@@ -1,4 +1,10 @@
 #!/usr/bin/env pybricks-micropython
+
+# Authors: Lianrui Geng && Xinyi Guo
+# Course:  UNC COMP 581
+# Lab:     Lab 01
+# Date:    October 6, 2025
+
 """
 EV3 MicroPython program for a three-part robotics lab.
 This version uses continuous motor running and the hold() command for a decisive, synchronous stop.
