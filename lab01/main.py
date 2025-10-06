@@ -1,6 +1,7 @@
 #!/usr/bin/env pybricks-micropython
 """
-EV3 MicroPython program for a three-part robotics challenge (Odometry, Ranging, Bumping).
+EV3 MicroPython program for a three-part robotics lab.
+This version uses continuous motor running and the hold() command for a decisive, synchronous stop.
 """
 
 import math
@@ -16,26 +17,23 @@ from pybricks.tools import wait
 # -- Port Assignments
 LEFT_MOTOR_PORT = Port.B
 RIGHT_MOTOR_PORT = Port.C
-TOUCH_SENSOR_PORT = Port.S1
+LEFT_TOUCH_SENSOR_PORT = Port.S1
+RIGHT_TOUCH_SENSOR_PORT = Port.S3
 ULTRASONIC_SENSOR_PORT = Port.S4
 
 # -- Robot Physical Parameters
-WHEEL_DIAMETER_MM = 56.0  # Wheel diameter (mm)
-AXLE_TRACK_MM = 114.0     # Distance between wheels (mm)
+WHEEL_DIAMETER_MM = 56.0
+WHEEL_CIRCUMFERENCE_MM = math.pi * WHEEL_DIAMETER_MM
 
 # -- Movement Speeds
-CRUISE_SPEED_MM_S = 220   # Speed for Obj 1 (mm/s)
-APPROACH_SPEED_MM_S = 140   # Speed for Obj 2 & 3 (mm/s)
+CRUISE_SPEED_MM_S = 100
+APPROACH_SPEED_MM_S = 100
 
 # -- Objective Parameters
 TARGET_DISTANCE_FROM_WALL_MM = 400
-# Offset from sensor to the front of the robot (mm).
-# Use a positive value if the sensor is recessed behind the bumper.
 SENSOR_TO_FRONT_OFFSET_MM = 30
+TARGET_SENSOR_DISTANCE_MM = TARGET_DISTANCE_FROM_WALL_MM - SENSOR_TO_FRONT_OFFSET_MM
 
-# -- Sensor Polling and Tolerance
-DISTANCE_TOLERANCE_MM = 10      # Allowed error margin for distance sensor (mm)
-SENSOR_POLL_INTERVAL_MS = 30    # How often to check sensors (ms)
 # endregion
 
 # ==============================================================================
@@ -45,52 +43,27 @@ SENSOR_POLL_INTERVAL_MS = 30    # How often to check sensors (ms)
 ev3 = EV3Brick()
 left_motor = Motor(LEFT_MOTOR_PORT)
 right_motor = Motor(RIGHT_MOTOR_PORT)
-touch_sensor = TouchSensor(TOUCH_SENSOR_PORT)
+left_touch_sensor = TouchSensor(LEFT_TOUCH_SENSOR_PORT)
+right_touch_sensor = TouchSensor(RIGHT_TOUCH_SENSOR_PORT)
 ultrasonic_sensor = UltrasonicSensor(ULTRASONIC_SENSOR_PORT)
 
-# Calculate the target distance for the sensor to read, accounting for its offset.
-TARGET_SENSOR_DISTANCE_MM = TARGET_DISTANCE_FROM_WALL_MM - SENSOR_TO_FRONT_OFFSET_MM
-WHEEL_CIRCUMFERENCE_MM = math.pi * WHEEL_DIAMETER_MM
 # endregion
 
 # ==============================================================================
-# region: --- LOW-LEVEL ROBOT CONTROL FUNCTIONS ---
+# region: --- HELPER FUNCTIONS ---
 # ==============================================================================
 
 def drive_straight(distance_mm: int, speed_mm_s: int):
-    """Drives the robot straight for a given distance."""
-    # Convert distance and speed to motor angle and rotational speed.
+    """Drives the robot straight for a specific distance. Used for Objective 1."""
     angle = (distance_mm / WHEEL_CIRCUMFERENCE_MM) * 360
     speed_deg_s = (speed_mm_s / WHEEL_CIRCUMFERENCE_MM) * 360
-
-    # Start both motors; wait=False runs them in parallel.
-    # The final wait=True blocks until the movement is complete.
     left_motor.run_target(speed_deg_s, angle, then=Stop.BRAKE, wait=False)
     right_motor.run_target(speed_deg_s, angle, then=Stop.BRAKE, wait=True)
-
-def start_driving(speed_mm_s: int):
-    """Starts the robot driving straight indefinitely."""
-    speed_deg_s = (speed_mm_s / WHEEL_CIRCUMFERENCE_MM) * 360
-    left_motor.run(speed_deg_s)
-    right_motor.run(speed_deg_s)
-
-def stop_driving():
-    """Stops both motors with a brake."""
-    left_motor.brake()
-    right_motor.brake()
-
-# endregion
-
-# ==============================================================================
-# region: --- UTILITY AND OBJECTIVE FUNCTIONS ---
-# ==============================================================================
 
 def wait_for_center_button_press(prompt_message: str):
     """Displays a message and waits for the center button to be pressed and released."""
     ev3.screen.clear()
     ev3.screen.print(prompt_message)
-    
-    # Debouncing logic: wait for release, then press, then release again.
     while Button.CENTER in ev3.buttons.pressed():
         wait(10)
     while Button.CENTER not in ev3.buttons.pressed():
@@ -98,49 +71,6 @@ def wait_for_center_button_press(prompt_message: str):
     while Button.CENTER in ev3.buttons.pressed():
         wait(10)
     ev3.speaker.beep()
-
-def drive_to_distance(target_sensor_mm: int, speed_mm_s: int):
-    """Drives until the ultrasonic sensor measures the target distance."""
-    is_driving_forward = speed_mm_s > 0
-    consecutive_hits = 0
-    required_hits = 3  # Require 3 consecutive valid readings to filter out noise.
-
-    start_driving(speed_mm_s)
-
-    while True:
-        current_distance = ultrasonic_sensor.distance()
-        
-        # Check if the target distance has been reached.
-        is_target_reached = False
-        if is_driving_forward:
-            if current_distance <= target_sensor_mm + DISTANCE_TOLERANCE_MM:
-                is_target_reached = True
-        else: # Driving backward
-            if current_distance >= target_sensor_mm - DISTANCE_TOLERANCE_MM:
-                is_target_reached = True
-
-        if is_target_reached:
-            consecutive_hits += 1
-        else:
-            consecutive_hits = 0
-
-        if consecutive_hits >= required_hits:
-            break
-
-        # Display debug info on the screen.
-        ev3.screen.clear()
-        ev3.screen.print("Dist(mm): {}".format(current_distance))
-        ev3.screen.print("Target: {}".format(target_sensor_mm))
-        wait(SENSOR_POLL_INTERVAL_MS)
-
-    stop_driving()
-    
-def drive_until_bump(speed_mm_s: int):
-    """Drives forward until the touch sensor is pressed."""
-    start_driving(speed_mm_s)
-    while not touch_sensor.pressed():
-        wait(SENSOR_POLL_INTERVAL_MS)
-    stop_driving()
 
 # endregion
 
@@ -150,29 +80,62 @@ def drive_until_bump(speed_mm_s: int):
 
 def main():
     """Executes the three objectives in sequence."""
-    ev3.speaker.beep() # Signal that the program is ready.
+    ev3.speaker.beep()
+    
+    # Convert approach speed to degrees per second
+    approach_speed_deg_s = (APPROACH_SPEED_MM_S / WHEEL_CIRCUMFERENCE_MM) * 360
 
     # --- Objective 1: Drive 1.4m (Odometry) ---
     wait_for_center_button_press("Obj 1: Go 1.4m")
     drive_straight(1400, CRUISE_SPEED_MM_S)
     ev3.speaker.beep(frequency=1000, duration=200)
 
-    # --- Objective 2: Approach Wall (Ranging) ---
+    # --- Objective 2: Approach Wall to 40cm ---
     wait_for_center_button_press("Obj 2: Approach wall")
-    drive_to_distance(TARGET_SENSOR_DISTANCE_MM, APPROACH_SPEED_MM_S)
+    
+    # Start continuous running
+    left_motor.run(approach_speed_deg_s)
+    right_motor.run(approach_speed_deg_s)
+
+    # Loop until the robot is close enough
+    while ultrasonic_sensor.distance() > TARGET_SENSOR_DISTANCE_MM:
+        wait(10) # Small delay to prevent overwhelming the processor
+
+    # Use hold() for a strong, synchronized stop
+    left_motor.hold()
+    right_motor.hold()
     ev3.speaker.beep(frequency=1200, duration=200)
 
     # --- Objective 3: Bump and Reverse ---
     wait_for_center_button_press("Obj 3: Bump & back up")
-    drive_until_bump(APPROACH_SPEED_MM_S)
+    
+    # Part A: Drive forward until a bumper is pressed
+    left_motor.run(approach_speed_deg_s)
+    right_motor.run(approach_speed_deg_s)
+
+    while not left_touch_sensor.pressed() and not right_touch_sensor.pressed():
+        wait(10)
+    
+    left_motor.hold()
+    right_motor.hold()
     ev3.speaker.beep(frequency=800, duration=150)
-    drive_to_distance(TARGET_SENSOR_DISTANCE_MM, -APPROACH_SPEED_MM_S) # Negative speed for reverse
+    
+    # Part B: Reverse until 40cm from the wall
+    wait(100) # Small delay before reversing
+    
+    left_motor.run(-approach_speed_deg_s)
+    right_motor.run(-approach_speed_deg_s)
+    
+    while ultrasonic_sensor.distance() < TARGET_SENSOR_DISTANCE_MM:
+        wait(10)
+
+    left_motor.hold()
+    right_motor.hold()
     
     # --- Completion ---
-    stop_driving()
     ev3.speaker.beep(frequency=600, duration=300)
     ev3.screen.clear()
-    ev3.screen.print("Challenge complete.")
+    ev3.screen.print("Lab complete.")
 
 if __name__ == "__main__":
     main()
