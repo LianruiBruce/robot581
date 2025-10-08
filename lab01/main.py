@@ -61,6 +61,8 @@ ultrasonic_sensor = UltrasonicSensor(ULTRASONIC_SENSOR_PORT)
 
 def drive_straight(distance_mm: int, speed_mm_s: int):
     """Drives the robot straight for a specific distance. Used for Objective 1."""
+    # since we shouldn't use drive module's function. 
+    # we have to make drive function by using simple math to pass into motor
     angle = (distance_mm / WHEEL_CIRCUMFERENCE_MM) * 360
     speed_deg_s = (speed_mm_s / WHEEL_CIRCUMFERENCE_MM) * 360
     left_motor.run_target(speed_deg_s, angle, then=Stop.BRAKE, wait=False)
@@ -71,6 +73,7 @@ def wait_for_center_button_press(prompt_message: str):
     ev3.screen.clear()
     ev3.screen.print(prompt_message)
     while Button.CENTER in ev3.buttons.pressed():
+        # wait for the system to check, decrease the error/offset
         wait(10)
     while Button.CENTER not in ev3.buttons.pressed():
         wait(10)
