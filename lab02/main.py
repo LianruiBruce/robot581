@@ -47,165 +47,355 @@ gyro.reset_angle(0)
 
 # ============================ HELPER FUNCTIONS =============================
 
-def drive_straight(distance_mm, speed=DRIVE_SPEED):
-    """
-    Drive straight for a specific distance.
-    Positive distance = forward, negative = backward
-    """
-    # Calculate rotation needed
+def drive_straight_pid(distance_mm, speed=DRIVE_SPEED):
+    """Drive straight for a specific distance using gyro PID control."""
     wheel_circumference = math.pi * WHEEL_DIAMETER_MM
-    rotation_degrees = (distance_mm / wheel_circumference) * 360
+    target_rotation = (abs(distance_mm) / wheel_circumference) * 360
     
-    # Reset motor angles
+    GYRO_KP = 3.0
+    GYRO_KI = 0.01
+    GYRO_KD = 1.5
+    
+    direction = 1 if distance_mm > 0 else -1
+    
     left_motor.reset_angle(0)
     right_motor.reset_angle(0)
+    initial_gyro = gyro.angle()
     
-    # Drive
-    left_motor.run_target(speed, rotation_degrees, Stop.HOLD, wait=False)
-    right_motor.run_target(speed, rotation_degrees, Stop.HOLD, wait=True)
-
-
-def turn_in_place(angle_degrees, speed=TURN_SPEED):
-    """
-    Turn in place by specified angle.
-    Positive angle = turn right, negative = turn left
-    """
-    # Calculate wheel rotation needed for turn
-    arc_length = (AXLE_TRACK_MM * math.pi * abs(angle_degrees)) / 360
-    wheel_circumference = math.pi * WHEEL_DIAMETER_MM
-    wheel_rotation = (arc_length / wheel_circumference) * 360
+    gyro_integral = 0
+    gyro_last_error = 0
     
-    # Reset motor angles
-    left_motor.reset_angle(0)
-    right_motor.reset_angle(0)
+    stopwatch = StopWatch()
+    last_time = 0
     
-    if angle_degrees > 0:  # Turn right
-        left_motor.run_target(speed, wheel_rotation, Stop.HOLD, wait=False)
-        right_motor.run_target(speed, -wheel_rotation, Stop.HOLD, wait=True)
-    else:  # Turn left
-        left_motor.run_target(speed, -wheel_rotation, Stop.HOLD, wait=False)
-        right_motor.run_target(speed, wheel_rotation, Stop.HOLD, wait=True)
-
-
-def drive_until_collision(speed=DRIVE_SPEED):
-    """
-    Drive forward until either touch sensor is pressed.
-    """
-    left_motor.run(speed)
-    right_motor.run(speed)
-    
-    while not touch_left.pressed() and not touch_right.pressed():
-        wait(10)
-    
-    # Stop motors
-    left_motor.stop(Stop.BRAKE)
-    right_motor.stop(Stop.BRAKE)
-
-
-def get_distance_to_wall():
-    """
-    Get distance to wall from ultrasonic sensor (in mm).
-    """
-    return ultrasonic.distance()
-
-
-def follow_wall_distance(target_distance_mm, wall_length_mm, speed=DRIVE_SPEED):
-    """
-    Follow the wall maintaining target distance for specified wall length.
-    Uses gyro to maintain parallel orientation and distance thresholds for correction.
-    Ultrasonic sensor is on the LEFT side of the robot.
-    
-    Strategy:
-    - Use gyro to keep robot parallel to wall (gyro angle = 0)
-    - Use distance thresholds to adjust when too far or too close
-    - Combine both corrections for smooth wall following
-    """
-    # Distance thresholds
-    DISTANCE_UPPER_LIMIT = target_distance_mm + 50  # 350mm - turn left toward wall
-    DISTANCE_LOWER_LIMIT = target_distance_mm - 50  # 250mm - turn right away from wall
-    
-    # Control parameters
-    DISTANCE_KP = 0.3  # Proportional gain for distance correction
-    GYRO_KP = 2.0      # Proportional gain for gyro correction (keep parallel)
-    
-    # Reset for tracking
-    left_motor.reset_angle(0)
-    right_motor.reset_angle(0)
-    
-    print("Starting wall following...")
+    print("Driving straight: " + str(distance_mm) + " mm")
     
     while True:
-        # Get current distance to wall
-        current_distance = get_distance_to_wall()
+        current_time = stopwatch.time()
+        dt = (current_time - last_time) / 1000.0
+        if dt == 0:
+            dt = 0.05
+        last_time = current_time
         
-        # Get current gyro angle
-        current_gyro = gyro.angle()
+        avg_rotation = (abs(left_motor.angle()) + abs(right_motor.angle())) / 2
         
-        # Display info on screen
-        ev3.screen.clear()
-        ev3.screen.draw_text(5, 5, "Dist: " + str(current_distance) + " mm")
-        ev3.screen.draw_text(5, 25, "Target: " + str(target_distance_mm) + " mm")
-        ev3.screen.draw_text(5, 45, "Gyro: " + str(current_gyro) + " deg")
-        
-        # Calculate wall travel distance (approximate from motor encoders)
-        avg_motor_angle = (left_motor.angle() + right_motor.angle()) / 2
-        wheel_circumference = math.pi * WHEEL_DIAMETER_MM
-        distance_traveled = (avg_motor_angle / 360) * wheel_circumference
-        
-        ev3.screen.draw_text(5, 65, "Travel: " + str(int(distance_traveled)) + " mm")
-        
-        # Check if we've traveled 2.2m along the wall
-        if distance_traveled >= wall_length_mm:
-            left_motor.stop(Stop.BRAKE)
-            right_motor.stop(Stop.BRAKE)
-            print("Wall following complete!")
+        if avg_rotation >= target_rotation:
             break
         
-        # Distance-based correction
-        # distance > target: too far, need to turn LEFT (toward wall)
-        # distance < target: too close, need to turn RIGHT (away from wall)
-        distance_error = current_distance - target_distance_mm
-        distance_correction = DISTANCE_KP * distance_error
+        gyro_error = gyro.angle() - initial_gyro
         
-        # Add status display
-        if current_distance > DISTANCE_UPPER_LIMIT:
-            ev3.screen.draw_text(5, 85, "Status: TOO FAR")
-        elif current_distance < DISTANCE_LOWER_LIMIT:
-            ev3.screen.draw_text(5, 85, "Status: TOO CLOSE")
+        gyro_p = GYRO_KP * gyro_error
+        gyro_integral += gyro_error * dt
+        gyro_integral = max(-30, min(30, gyro_integral))
+        gyro_i = GYRO_KI * gyro_integral
+        gyro_derivative = (gyro_error - gyro_last_error) / dt
+        gyro_d = GYRO_KD * gyro_derivative
+        gyro_last_error = gyro_error
+        
+        correction = gyro_p + gyro_i + gyro_d
+        correction = max(-50, min(50, correction))
+        
+        if direction > 0:
+            left_speed = speed - correction
+            right_speed = speed + correction
         else:
-            ev3.screen.draw_text(5, 85, "Status: GOOD")
+            left_speed = speed + correction
+            right_speed = speed - correction
         
-        # Gyro-based correction (maintain parallel to wall)
-        # gyro > 0: robot turned right, need to turn LEFT to correct
-        # gyro < 0: robot turned left, need to turn RIGHT to correct
-        gyro_error = current_gyro
-        gyro_correction = GYRO_KP * gyro_error
+        left_speed = left_speed * direction
+        right_speed = right_speed * direction
         
-        # Total correction calculation:
-        # Positive value = need to turn LEFT (right motor faster, left motor slower)
-        # Negative value = need to turn RIGHT (left motor faster, right motor slower)
-        total_correction = gyro_correction + distance_correction
+        max_abs_speed = speed * 1.2
+        left_speed = max(-max_abs_speed, min(max_abs_speed, left_speed))
+        right_speed = max(-max_abs_speed, min(max_abs_speed, right_speed))
         
-        # Limit total correction
-        total_correction = max(-80, min(80, total_correction))
-        
-        # Apply correction to motor speeds
-        # Turn LEFT: slow down left wheel, speed up right wheel
-        # Turn RIGHT: speed up left wheel, slow down right wheel
-        left_speed = speed - total_correction
-        right_speed = speed + total_correction
-        
-        # Ensure speeds stay positive and reasonable
-        left_speed = max(80, min(speed * 1.3, left_speed))
-        right_speed = max(80, min(speed * 1.3, right_speed))
-        
-        # Apply speeds
         left_motor.run(left_speed)
         right_motor.run(right_speed)
         
-        wait(50)  # Update every 50ms
+        wait(20)
     
-    # Stop motors
+    left_motor.stop(Stop.BRAKE)
+    right_motor.stop(Stop.BRAKE)
+    wait(100)
+    
+    print("Drive complete.")
+
+
+def turn_in_place_pid(angle_degrees, speed=TURN_SPEED):
+    """Turn in place by specified angle using gyro feedback."""
+    COARSE_KP = 2.5
+    FINE_KP = 5.0
+    FINE_KI = 0.08
+    FINE_KD = 3.0
+    
+    initial_gyro = gyro.angle()
+    target_gyro = initial_gyro + angle_degrees
+    
+    integral = 0
+    last_error = 0
+    
+    stopwatch = StopWatch()
+    last_time = 0
+    stable_count = 0
+    
+    print("Turning from " + str(initial_gyro) + " to " + str(target_gyro) + " deg")
+    
+    # Coarse turn
+    while True:
+        current_gyro = gyro.angle()
+        error = target_gyro - current_gyro
+        
+        if abs(error) < 5:
+            break
+        
+        if stopwatch.time() > 5000:
+            print("Coarse turn timeout!")
+            break
+        
+        turn_speed = max(-speed, min(speed, COARSE_KP * error))
+        
+        left_motor.run(turn_speed)
+        right_motor.run(-turn_speed)
+        
+        wait(10)
+    
+    left_motor.stop(Stop.BRAKE)
+    right_motor.stop(Stop.BRAKE)
+    wait(100)
+    
+    stopwatch.reset()
+    
+    # Fine turn
+    while True:
+        current_time = stopwatch.time()
+        dt = (current_time - last_time) / 1000.0
+        if dt == 0 or dt < 0.01:
+            dt = 0.02
+        last_time = current_time
+        
+        current_gyro = gyro.angle()
+        error = target_gyro - current_gyro
+        
+        if abs(error) < 0.5:
+            stable_count += 1
+            if stable_count > 5:
+                print("Target reached!")
+                break
+        else:
+            stable_count = 0
+        
+        if stopwatch.time() > 3000:
+            print("Fine turn timeout")
+            break
+        
+        p = FINE_KP * error
+        integral += error * dt
+        integral = max(-10, min(10, integral))
+        i = FINE_KI * integral
+        derivative = (error - last_error) / dt
+        d = FINE_KD * derivative
+        last_error = error
+        
+        turn_speed = p + i + d
+        turn_speed = max(-speed * 0.6, min(speed * 0.6, turn_speed))
+        
+        left_motor.run(turn_speed)
+        right_motor.run(-turn_speed)
+        
+        wait(20)
+    
+    left_motor.stop(Stop.BRAKE)
+    right_motor.stop(Stop.BRAKE)
+    wait(200)
+    
+    print("Turn complete!")
+
+
+def drive_until_collision_controlled(speed=DRIVE_SPEED):
+    """Drive forward until collision."""
+    print("Driving forward until collision...")
+    
+    left_motor.reset_angle(0)
+    right_motor.reset_angle(0)
+    initial_gyro = gyro.angle()
+    
+    GYRO_KP = 2.5
+    
+    while True:
+        left_pressed = touch_left.pressed()
+        right_pressed = touch_right.pressed()
+        
+        if left_pressed or right_pressed:
+            left_motor.stop(Stop.BRAKE)
+            right_motor.stop(Stop.BRAKE)
+            print("Collision detected!")
+            return
+        
+        gyro_error = gyro.angle() - initial_gyro
+        correction = GYRO_KP * gyro_error
+        correction = max(-30, min(30, correction))
+        
+        left_speed = speed - correction
+        right_speed = speed + correction
+        
+        left_motor.run(left_speed)
+        right_motor.run(right_speed)
+        
+        wait(20)
+
+
+def follow_wall_diagnostic(target_distance_mm=300, wall_length_mm=2200, speed=DRIVE_SPEED):
+    """
+    诊断版本 - 输出详细信息
+    
+    添加了：
+    1. 每次迭代都输出左右轮速度
+    2. 增加修正增益，让转向更明显
+    3. 提供符号反转选项
+    """
+    print("="*50)
+    print("DIAGNOSTIC WALL FOLLOWING")
+    print("="*50)
+    print("Target: " + str(target_distance_mm) + "mm")
+    print("Length: " + str(wall_length_mm) + "mm")
+    
+    # ========== 关键参数 ==========
+    TARGET_DISTANCE = target_distance_mm
+    
+    # 增加修正增益，让效果更明显！
+    CORRECTION_GAIN = 1.8  # 大幅增加！让转向更明显
+    MAX_CORRECTION = 150    # 增加最大修正
+    
+    # 陀螺仪辅助暂时禁用，先测试纯距离控制
+    GYRO_ASSIST = 0.0  # 先设为0，只用距离控制
+    
+    # 符号反转选项
+    REVERSE_CORRECTION = False  # 如果方向反了，改成True
+    
+    # ⚠️ 如果机器人还是不转，尝试以下操作：
+    # 1. 把 CORRECTION_GAIN 增加到 2.5
+    # 2. 把 REVERSE_CORRECTION 改成 True
+    # 3. 把下面的 min_speed 改成 30
+    
+    print("CORRECTION_GAIN: " + str(CORRECTION_GAIN))
+    print("MAX_CORRECTION: " + str(MAX_CORRECTION))
+    print("GYRO_ASSIST: " + str(GYRO_ASSIST))
+    print("REVERSE_CORRECTION: " + str(REVERSE_CORRECTION))
+    print("="*50)
+    
+    # 初始化
+    left_motor.reset_angle(0)
+    right_motor.reset_angle(0)
+    
+    parallel_gyro_reference = gyro.angle()
+    
+    iteration = 0
+    
+    while True:
+        iteration += 1
+        
+        # 读取距离
+        try:
+            current_distance = ultrasonic.distance()
+        except:
+            current_distance = TARGET_DISTANCE
+        
+        if current_distance <= 0 or current_distance > 2000:
+            current_distance = TARGET_DISTANCE
+        
+        # 计算距离误差
+        distance_error = current_distance - TARGET_DISTANCE
+        
+        # 计算修正
+        distance_correction = distance_error * CORRECTION_GAIN
+        
+        # 限制修正
+        distance_correction = max(-MAX_CORRECTION, min(MAX_CORRECTION, distance_correction))
+        
+        # 陀螺仪辅助（当前禁用）
+        current_gyro = gyro.angle()
+        gyro_deviation = current_gyro - parallel_gyro_reference
+        gyro_correction = gyro_deviation * GYRO_ASSIST
+        
+        # 总修正
+        total_correction = distance_correction + gyro_correction
+        
+        # 符号反转选项
+        if REVERSE_CORRECTION:
+            total_correction = -total_correction
+        
+        # 应用到电机
+        left_speed = speed - total_correction
+        right_speed = speed + total_correction
+        
+        # 限制速度（允许更大的差异）
+        min_speed = 40  # 降低最小速度
+        max_speed = speed * 1.6  # 提高最大速度
+        left_speed = max(min_speed, min(max_speed, left_speed))
+        right_speed = max(min_speed, min(max_speed, right_speed))
+        
+        # 运行电机
+        left_motor.run(left_speed)
+        right_motor.run(right_speed)
+        
+        # ========== 详细输出（每次迭代） ==========
+        print("="*50)
+        print("Iter: " + str(iteration))
+        print("Distance: " + str(int(current_distance)) + "mm")
+        print("Error: " + str(int(distance_error)) + "mm")
+        print("Correction: " + str(int(total_correction)))
+        print("Left Speed: " + str(int(left_speed)))
+        print("Right Speed: " + str(int(right_speed)))
+        
+        # 判断应该往哪转
+        if distance_error < -20:
+            print(">>> TOO CLOSE - Should turn RIGHT (away)")
+            print(">>> Expected: Left FASTER, Right SLOWER")
+        elif distance_error > 20:
+            print(">>> TOO FAR - Should turn LEFT (toward)")
+            print(">>> Expected: Left SLOWER, Right FASTER")
+        else:
+            print(">>> GOOD DISTANCE")
+        
+        # 实际电机速度对比
+        if left_speed > right_speed + 20:
+            print(">>> ACTUAL: Turning RIGHT")
+        elif right_speed > left_speed + 20:
+            print(">>> ACTUAL: Turning LEFT")
+        else:
+            print(">>> ACTUAL: Going STRAIGHT")
+        
+        print("="*50)
+        
+        # 屏幕显示
+        ev3.screen.clear()
+        ev3.screen.draw_text(5, 5, "D:" + str(current_distance))
+        ev3.screen.draw_text(5, 20, "Err:" + str(int(distance_error)))
+        ev3.screen.draw_text(5, 35, "Corr:" + str(int(total_correction)))
+        ev3.screen.draw_text(5, 50, "L:" + str(int(left_speed)))
+        ev3.screen.draw_text(5, 65, "R:" + str(int(right_speed)))
+        
+        if current_distance < TARGET_DISTANCE - 20:
+            ev3.screen.draw_text(5, 80, "TOO CLOSE >>")
+        elif current_distance > TARGET_DISTANCE + 20:
+            ev3.screen.draw_text(5, 80, "<< TOO FAR")
+        else:
+            ev3.screen.draw_text(5, 80, "GOOD")
+        
+        # 计算行进距离
+        avg_motor_angle = (abs(left_motor.angle()) + abs(right_motor.angle())) / 2
+        wheel_circumference = math.pi * WHEEL_DIAMETER_MM
+        distance_traveled = (avg_motor_angle / 360) * wheel_circumference
+        
+        # 检查完成
+        if distance_traveled >= wall_length_mm:
+            left_motor.stop(Stop.BRAKE)
+            right_motor.stop(Stop.BRAKE)
+            print("COMPLETE!")
+            break
+        
+        wait(100)  # 增加延迟，方便观察输出
+    
     left_motor.stop(Stop.BRAKE)
     right_motor.stop(Stop.BRAKE)
 
@@ -213,61 +403,100 @@ def follow_wall_distance(target_distance_mm, wall_length_mm, speed=DRIVE_SPEED):
 # ============================ MAIN PROGRAM =============================
 
 def main():
-    ev3.speaker.beep()
-    print("Starting Wall Following Lab")
-    print("Press CENTER button to start...")
-    
-    # Wait for center button press
-    while True:
-        if Button.CENTER in ev3.buttons.pressed():
-            break
-        wait(10)
-    
-    ev3.speaker.beep()
-    print("Starting program!")
-    wait(500)
-    
-    # ============== OBJECTIVE 1: DETECT WALL ==============
-    print("Objective 1: Driving to wall...")
-    
-    # Drive forward until collision
-    drive_until_collision(speed=DRIVE_SPEED)
-    ev3.speaker.beep()
-    print("Wall detected!")
-    
-    # Back up 300mm (30cm)
-    print("Backing up 30cm...")
-    drive_straight(-300, speed=DRIVE_SPEED)
-    wait(500)
-    
-    # ============== OBJECTIVE 2: TURN AT WALL ==============
-    print("Objective 2: Turning right...")
-    
-    # Turn 90 degrees right
-    turn_in_place(90, speed=TURN_SPEED)
-    wait(500)
-    
-    # RESET GYRO after turning - this is critical!
-    print("Resetting gyro sensor...")
-    gyro.reset_angle(0)
-    wait(200)
-    
-    ev3.speaker.beep()
-    print("Turn complete! Gyro reset to 0.")
-    print("Current gyro: " + str(gyro.angle()))
-    
-    # ============== OBJECTIVE 3: FOLLOW THE WALL ==============
-    print("Objective 3: Following wall for 2.2m...")
-    
-    # Follow wall at 300mm (30cm) distance for 2200mm (2.2m)
-    follow_wall_distance(target_distance_mm=300, wall_length_mm=2200, speed=DRIVE_SPEED)
-    
-    # Stop and beep to announce completion
-    ev3.speaker.beep()
-    ev3.speaker.beep()
-    ev3.speaker.beep()
-    print("Destination reached!")
-    print("Lab complete!")
+    """主程序"""
+    try:
+        ev3.speaker.beep()
+        print("="*50)
+        print("DIAGNOSTIC VERSION")
+        print("Detailed Speed Output")
+        print("="*50)
+        print("")
+        print("Press CENTER to start...")
+        
+        while True:
+            if Button.CENTER in ev3.buttons.pressed():
+                break
+            wait(10)
+        
+        ev3.speaker.beep()
+        wait(3000)
+        
+        # ============== 目标1：检测墙壁 ==============
+        print("")
+        print("="*50)
+        print("OBJECTIVE 1: Detect Wall")
+        print("="*50)
+        
+        drive_until_collision_controlled(speed=DRIVE_SPEED)
+        
+        ev3.speaker.beep()
+        wait(500)
+        
+        print("Backing up 30cm...")
+        drive_straight_pid(-300, speed=DRIVE_SPEED)
+        wait(500)
+        
+        # ============== 目标2：右转90度 ==============
+        print("")
+        print("="*50)
+        print("OBJECTIVE 2: Turn Right 90°")
+        print("="*50)
+        
+        print("Turning...")
+        turn_in_place_pid(90, speed=TURN_SPEED)
+        wait(500)
+        
+        print("Resetting gyro...")
+        gyro.reset_angle(0)
+        wait(300)
+        
+        ev3.speaker.beep()
+        print("Turn complete!")
+        wait(500)
+        
+        # ============== 目标3：诊断墙壁跟随 ==============
+        print("")
+        print("="*50)
+        print("OBJECTIVE 3: Diagnostic Wall Following")
+        print("="*50)
+        print("Watch terminal for detailed output!")
+        print("Each iteration shows:")
+        print("- Current distance")
+        print("- Distance error")
+        print("- Correction value")
+        print("- Left/Right speeds")
+        print("- Expected vs Actual turning direction")
+        print("="*50)
+        
+        follow_wall_diagnostic(
+            target_distance_mm=300,
+            wall_length_mm=2200,
+            speed=DRIVE_SPEED
+        )
+        
+        # ============== 成功！ ==============
+        print("")
+        print("="*50)
+        print("SUCCESS!")
+        print("="*50)
+        
+        for i in range(4):
+            ev3.speaker.beep(frequency=800 + i*200, duration=100)
+            wait(150)
+        
+    except Exception as e:
+        print("")
+        print("="*50)
+        print("ERROR!")
+        print("="*50)
+        print("Error: " + str(e))
+        
+        left_motor.stop(Stop.BRAKE)
+        right_motor.stop(Stop.BRAKE)
+        
+        ev3.speaker.beep(frequency=400, duration=300)
+        wait(200)
+        ev3.speaker.beep(frequency=400, duration=300)
 
 
 # ============================ RUN PROGRAM =============================
