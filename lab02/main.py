@@ -280,7 +280,7 @@ def follow_wall_diagnostic(target_distance_mm=300, wall_length_mm=2400, speed=DR
     
     # Reverse correction option
     REVERSE_CORRECTION = False  # If direction is wrong, change to True
-    K_FAR = 5
+    K_FAR = 10
 
     ALPHA = 0.35
     
@@ -314,7 +314,7 @@ def follow_wall_diagnostic(target_distance_mm=300, wall_length_mm=2400, speed=DR
         except:
             current_distance = last_distance
         
-        if current_distance <= 0 or current_distance > 600:
+        if current_distance <= 0 or current_distance > 2000:
             current_distance = last_distance
         else:
             current_distance = ALPHA*current_distance + (1-ALPHA)*last_distance
