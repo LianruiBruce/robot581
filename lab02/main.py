@@ -49,16 +49,9 @@ gyro.reset_angle(0)
 wait(10)
 
 # ============================ HELPER FUNCTIONS =============================
-<<<<<<< Updated upstream
-# test branch
-=======
 
 def clamp(x, lo, hi):
     return lo if x < lo else hi if x > hi else x
-<<<<<<< Updated upstream
->>>>>>> Stashed changes
-=======
->>>>>>> Stashed changes
 
 def get_distance_mm(last_distance, retries=3, alpha=0.5, min_mm=40, max_mm=600):
     """
@@ -301,19 +294,6 @@ def follow_wall_diagnostic(target_distance_mm=300, wall_length_mm=2400, speed=DR
     # 基础比例增益（简洁稳定）
     CORRECTION_GAIN = 1.4
     MAX_CORRECTION = 100
-<<<<<<< Updated upstream
-<<<<<<< Updated upstream
-    
-    # Gyro assist temporarily disabled, test distance-only control first
-    GYRO_ASSIST = 0.0
-    
-    # Reverse correction option
-    REVERSE_CORRECTION = False  # If direction is wrong, change to True
-    K_FAR = 3
-=======
->>>>>>> Stashed changes
-=======
->>>>>>> Stashed changes
 
     # Gyro assist（保持关闭）
     GYRO_ASSIST = 0.0
@@ -334,7 +314,7 @@ def follow_wall_diagnostic(target_distance_mm=300, wall_length_mm=2400, speed=DR
     MAX_WALL_MM = 600
     EDGE_RISE_MM = 35    # 显著变远阈值（短周期下调）
     EDGE_TICKS_HOLD = 10
-    EDGE_BIAS = 60      # 负=右转（你的速度定义）
+    EDGE_BIAS = -60      # 负=右转（你的速度定义）
 
     # 内拐角（真变近）
     CORNER_DROP_MM = -20
@@ -364,43 +344,14 @@ def follow_wall_diagnostic(target_distance_mm=300, wall_length_mm=2400, speed=DR
     iteration = 0
     continue_far = 0
 
-<<<<<<< Updated upstream
-<<<<<<< Updated upstream
-=======
-=======
->>>>>>> Stashed changes
     # 状态
     edge_ticks = 0
     corner_ticks = 0
     persist_pos = 0
 
-<<<<<<< Updated upstream
->>>>>>> Stashed changes
     while True:
         iteration += 1
 
-<<<<<<< Updated upstream
-        # Compute distance error
-        distance_error = current_distance - TARGET_DISTANCE
-        
-        # Compute correction
-        distance_correction = distance_error * CORRECTION_GAIN
-        if distance_error > 15 and continue_far < K_FAR:
-            continue_far += 1
-            distance_correction = 0
-        elif distance_error < 15:
-            continue_far = 0
-    
-        # Limit correction
-        distance_correction = max(-MAX_CORRECTION, min(MAX_CORRECTION, distance_correction))
-        
-        # Gyro assist (currently disabled)
-=======
-=======
-    while True:
-        iteration += 1
-
->>>>>>> Stashed changes
         # ---------- Robust distance read ----------
         current_distance = get_distance_mm(
             last_distance,
@@ -410,10 +361,6 @@ def follow_wall_diagnostic(target_distance_mm=300, wall_length_mm=2400, speed=DR
         )
 
         # ---------- Deltas & classification ----------
-<<<<<<< Updated upstream
->>>>>>> Stashed changes
-=======
->>>>>>> Stashed changes
         current_gyro = gyro.angle()
         gyro_deviation = current_gyro - parallel_gyro_reference  # 相对平行参考
         delta_theta_step = current_gyro - prev_gyro               # 本周期转角（°）
