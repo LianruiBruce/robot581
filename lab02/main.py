@@ -276,14 +276,13 @@ def drive_until_collision_controlled(speed=DRIVE_SPEED):
 
 def follow_wall_diagnostic(target_distance_mm=300, wall_length_mm=2400, speed=DRIVE_SPEED):
     """
-    Diagnostic wall following with robust ultrasonic handling:
-      - 重试+中值+EMA 读数
-      - 真/假变远判别（持续性 + 幅度 + 陀螺）
-      - 内拐角/外拐角短时偏置
-      - 纠偏爬升限速
+    改进的墙壁跟随算法：
+      - 修复了外折墙壁时不能左转的问题
+      - 移除了阻止"距离过远"纠正的逻辑
+      - 改进了真/假变远的判别
     """
     print("="*50)
-    print("DIAGNOSTIC WALL FOLLOWING")
+    print("DIAGNOSTIC WALL FOLLOWING (FIXED)")
     print("="*50)
     print("Target: " + str(target_distance_mm) + "mm")
     print("Length: " + str(wall_length_mm) + "mm")
@@ -291,7 +290,7 @@ def follow_wall_diagnostic(target_distance_mm=300, wall_length_mm=2400, speed=DR
     # ========== Key Parameters ==========
     TARGET_DISTANCE = target_distance_mm
 
-    # 基础比例增益（简洁稳定）
+    # 基础比例增益
     CORRECTION_GAIN = 1.4
     MAX_CORRECTION = 100
 
@@ -302,19 +301,19 @@ def follow_wall_diagnostic(target_distance_mm=300, wall_length_mm=2400, speed=DR
     MAX_DELTA_CORR = 20
 
     # 读取与平滑
-    ALPHA = 0.5          # 比 0.35 稍灵敏，已用中值抗尖峰
+    ALPHA = 0.5
     READ_RETRIES = 3
 
-    # 真/假变远判别（采样间隔较短：wait(10)）
-    POS_STEP = 15        # 单周期“变远”阈值(mm)
+    # 真/假变远判别
+    POS_STEP = 15        # 单周期"变远"阈值(mm)
     K_PERSIST = 3        # 连续变远次数阈值
-    THETA_SMALL = 5      # 陀螺显著转角阈值(°)，按步差
+    THETA_SMALL = 5      # 陀螺显著转角阈值(°)
 
-    # 外拐角/探空
+    # 外拐角/探空（只用于检测开放空间，不是外折墙壁）
     MAX_WALL_MM = 600
-    EDGE_RISE_MM = 35    # 显著变远阈值（短周期下调）
+    EDGE_RISE_MM = 50    # 提高阈值，只在真正探空时触发
     EDGE_TICKS_HOLD = 10
-    EDGE_BIAS = -60      # 负=右转（你的速度定义）
+    EDGE_BIAS = -60      # 负=右转
 
     # 内拐角（真变近）
     CORNER_DROP_MM = -20
@@ -342,7 +341,6 @@ def follow_wall_diagnostic(target_distance_mm=300, wall_length_mm=2400, speed=DR
     last_correction = 0.0
 
     iteration = 0
-    continue_far = 0
 
     # 状态
     edge_ticks = 0
@@ -362,31 +360,35 @@ def follow_wall_diagnostic(target_distance_mm=300, wall_length_mm=2400, speed=DR
 
         # ---------- Deltas & classification ----------
         current_gyro = gyro.angle()
-        gyro_deviation = current_gyro - parallel_gyro_reference  # 相对平行参考
-        delta_theta_step = current_gyro - prev_gyro               # 本周期转角（°）
-        delta_d = current_distance - last_distance                # 本周期距离变化（mm）
+        gyro_deviation = current_gyro - parallel_gyro_reference
+        delta_theta_step = current_gyro - prev_gyro
+        delta_d = current_distance - last_distance
 
-        # 持续性统计：连续“变远”
+        # 持续性统计：连续"变远"
         if delta_d > POS_STEP:
             persist_pos += 1
         else:
             persist_pos = max(0, persist_pos - 1)
 
-        # 三条规则：连续 or 幅度+姿态 → 真变远
+        # 判断是否是"真正的墙壁变远"（外折）vs "探空"（开放空间）
+        # 外折：距离缓慢增加，没有急剧变远
+        # 探空：距离急剧增加到很远
         is_true_far = (
             persist_pos >= K_PERSIST or
             (delta_d > POS_STEP and abs(delta_theta_step) >= THETA_SMALL)
         )
+        
+        # 探空检测：只有在距离变得非常远时才判断为探空
+        is_open_space = current_distance >= MAX_WALL_MM * 0.8  # 480mm以上
 
         # 内拐角：快速变近且已较近 → 左转增强
         if corner_ticks == 0:
             if delta_d <= CORNER_DROP_MM and current_distance <= CORNER_NEAR_MM:
                 corner_ticks = CORNER_TICKS
 
-        # 外拐角/探空：显著变远或探空，且不像真变远 → 右转寻墙
-        if edge_ticks == 0 and not is_true_far:
-            if delta_d >= EDGE_RISE_MM or current_distance >= MAX_WALL_MM:
-                edge_ticks = EDGE_TICKS_HOLD
+        # 探空检测：只在真正的开放空间时右转寻墙
+        if edge_ticks == 0 and is_open_space:
+            edge_ticks = EDGE_TICKS_HOLD
 
         # ---------- Compute distance error ----------
         distance_error = current_distance - TARGET_DISTANCE
@@ -394,12 +396,13 @@ def follow_wall_diagnostic(target_distance_mm=300, wall_length_mm=2400, speed=DR
         # ---------- Compute correction ----------
         distance_correction = distance_error * CORRECTION_GAIN
 
-        # 你原来的“连续远→清零一次纠偏”的逻辑（保留）
-        if distance_correction > 15 and continue_far < 3:
-            continue_far += 1
-            distance_correction = 0
-        else:
-            continue_far = 0
+        # ✅ 修复：移除了阻止"距离过远"纠正的逻辑
+        # 原来的代码在这里会清零distance_correction，导致外折墙壁时不能左转
+        # if distance_correction > 15 and continue_far < 3:
+        #     continue_far += 1
+        #     distance_correction = 0  # ❌ 这是问题所在！
+        # else:
+        #     continue_far = 0
 
         distance_correction = clamp(distance_correction, -MAX_CORRECTION, MAX_CORRECTION)
 
@@ -412,15 +415,13 @@ def follow_wall_diagnostic(target_distance_mm=300, wall_length_mm=2400, speed=DR
         if abs(gyro_deviation) > 60:
             total_correction = 0
 
-        # 角点/边缘微策略（固定偏置，易调易关）
+        # 角点/边缘微策略
         if corner_ticks > 0:
             total_correction += CORNER_BIAS   # 左转
             corner_ticks -= 1
-        elif edge_ticks > 0 and not is_true_far:
+        elif edge_ticks > 0:
+            # 只在探空时右转，不在外折墙壁时右转
             total_correction += EDGE_BIAS     # 右转
-            # 抑制“读数继续变远”对控制的影响（可选）
-            if current_distance > last_distance:
-                current_distance = last_distance
             edge_ticks -= 1
 
         # 纠偏爬升限速
@@ -454,7 +455,7 @@ def follow_wall_diagnostic(target_distance_mm=300, wall_length_mm=2400, speed=DR
         print("Δd:", int(delta_d), "mm",
               "Δθ(step):", int(delta_theta_step), "deg",
               "gyro_dev:", int(gyro_deviation), "deg")
-        print("PersistFar:", persist_pos, "TrueFar:", is_true_far)
+        print("PersistFar:", persist_pos, "TrueFar:", is_true_far, "OpenSpace:", is_open_space)
         print("Corner:", corner_ticks, "Edge:", edge_ticks)
         print("Correction:", int(total_correction))
         print("Left Speed:", int(left_speed), "Right Speed:", int(right_speed))
@@ -479,7 +480,7 @@ def follow_wall_diagnostic(target_distance_mm=300, wall_length_mm=2400, speed=DR
 
         print("="*50)
 
-        # Display on screen（简洁对比：滤波后/原始）
+        # Display on screen
         ev3.screen.clear()
         ev3.screen.draw_text(5, 5,  "D:" + str(int(current_distance)))
         ev3.screen.draw_text(5, 20, "Raw:" + str(ultrasonic.distance()))
@@ -488,8 +489,8 @@ def follow_wall_diagnostic(target_distance_mm=300, wall_length_mm=2400, speed=DR
         ev3.screen.draw_text(5, 65, "L/R:" + str(int(left_speed)) + "/" + str(int(right_speed)))
         if corner_ticks > 0:
             ev3.screen.draw_text(5, 80, "CORNER<<")
-        elif edge_ticks > 0 and not is_true_far:
-            ev3.screen.draw_text(5, 80, "EDGE>>")
+        elif edge_ticks > 0:
+            ev3.screen.draw_text(5, 80, "OPEN SPACE>>")
         else:
             if current_distance < TARGET_DISTANCE - 20:
                 ev3.screen.draw_text(5, 80, "TOO CLOSE >>")
@@ -526,8 +527,7 @@ def main():
     try:
         ev3.speaker.beep()
         print("="*50)
-        print("DIAGNOSTIC VERSION")
-        print("Detailed Speed Output")
+        print("FIXED VERSION - 外折墙壁问题已修复")
         print("="*50)
         print("")
         print("Press CENTER to start...")
@@ -573,18 +573,15 @@ def main():
         print("Turn complete!")
         wait(500)
 
-        # ============== Objective 3: Diagnostic Wall Following ==============
+        # ============== Objective 3: Fixed Wall Following ==============
         print("")
         print("="*50)
-        print("OBJECTIVE 3: Diagnostic Wall Following")
+        print("OBJECTIVE 3: Fixed Wall Following")
         print("="*50)
-        print("Watch terminal for detailed output!")
-        print("Each iteration shows:")
-        print("- Current distance")
-        print("- Distance error")
-        print("- Correction value")
-        print("- Left/Right speeds")
-        print("- Expected vs Actual turning direction")
+        print("修复：")
+        print("1. 移除了阻止'距离过远'纠正的逻辑")
+        print("2. 改进了外折墙壁 vs 探空的判别")
+        print("3. 现在能正确左转靠近外折墙壁")
         print("="*50)
 
         wait(10)
