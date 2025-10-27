@@ -327,9 +327,9 @@ def follow_wall_diagnostic(target_distance_mm=300, wall_length_mm=2400, speed=DR
         if distance_correction > 15 and continue_far < K_FAR:
             continue_far += 1
             distance_correction = 0
-        else:
+        elif distance_correction < 15:
             continue_far = 0
-        
+    
         # Limit correction
         distance_correction = max(-MAX_CORRECTION, min(MAX_CORRECTION, distance_correction))
         
