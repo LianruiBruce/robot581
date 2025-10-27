@@ -280,7 +280,7 @@ def follow_wall_diagnostic(target_distance_mm=300, wall_length_mm=2400, speed=DR
     
     # Reverse correction option
     REVERSE_CORRECTION = False  # If direction is wrong, change to True
-    K_FAR = 20
+    K_FAR = 15
 
     ALPHA = 0.35
     
@@ -396,6 +396,7 @@ def follow_wall_diagnostic(target_distance_mm=300, wall_length_mm=2400, speed=DR
         ev3.screen.draw_text(5, 5, "D:" + str(current_distance))
         # ev3.screen.draw_text(5, 20, "Err:" + str(int(distance_error)))
         # ev3.screen.draw_text(5, 35, "Corr:" + str(int(total_correction)))
+        ev3.screen.draw_text(5, 35, "pos: " + str(continue_far))
         # ev3.screen.draw_text(5, 50, "L:" + str(int(left_speed)))
         # ev3.screen.draw_text(5, 65, "R:" + str(int(right_speed)))
         ev3.screen.draw_text(5, 50, "X: "+ str(ultrasonic.distance()))
