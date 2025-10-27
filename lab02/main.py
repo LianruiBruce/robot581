@@ -394,12 +394,19 @@ def follow_wall_diagnostic(target_distance_mm=300, wall_length_mm=2400, speed=DR
         # ---------- Compute correction ----------
         distance_correction = distance_error * CORRECTION_GAIN
 
-        # 你原来的“连续远→清零一次纠偏”的逻辑（保留）
-        if distance_correction > 15 and continue_far < 3:
-            continue_far += 1
+        # # 你原来的“连续远→清零一次纠偏”的逻辑（保留）
+        # if distance_correction > 15 and continue_far < 3:
+        #     continue_far += 1
+        #     distance_correction = 0
+        # else:
+        #     continue_far = 0
+        # 对称死区，避免抖动；交给爬升限速去平顺过渡
+        # TODO: need test
+        DEADBAND_MM = 12  # 可调 10~15
+        if abs(distance_error) <= DEADBAND_MM:
             distance_correction = 0
-        else:
-            continue_far = 0
+        # 否则保持你已有的 distance_correction 计算与 clamp（上一行已经算过）
+
 
         distance_correction = clamp(distance_correction, -MAX_CORRECTION, MAX_CORRECTION)
 
