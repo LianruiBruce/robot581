@@ -280,7 +280,7 @@ def follow_wall_diagnostic(target_distance_mm=300, wall_length_mm=2400, speed=DR
     
     # Reverse correction option
     REVERSE_CORRECTION = False  # If direction is wrong, change to True
-    K_FAR = 50
+    K_FAR = 20
 
     ALPHA = 0.35
     
@@ -326,7 +326,7 @@ def follow_wall_diagnostic(target_distance_mm=300, wall_length_mm=2400, speed=DR
         distance_correction = distance_error * CORRECTION_GAIN
         if distance_error > 15 and continue_far < K_FAR:
             continue_far += 1
-            distance_correction = 0
+            distance_correction = -5
         elif distance_error < 15:
             continue_far = 0
     
