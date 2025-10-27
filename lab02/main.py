@@ -314,7 +314,7 @@ def follow_wall_diagnostic(target_distance_mm=300, wall_length_mm=2400, speed=DR
         except:
             current_distance = last_distance
         
-        if current_distance <= 0 or current_distance > 2000:
+        if current_distance <= 0:
             current_distance = last_distance
         else:
             current_distance = ALPHA*current_distance + (1-ALPHA)*last_distance
@@ -326,7 +326,7 @@ def follow_wall_diagnostic(target_distance_mm=300, wall_length_mm=2400, speed=DR
         distance_correction = distance_error * CORRECTION_GAIN
         if distance_error > 15 and continue_far < K_FAR:
             continue_far += 1
-            distance_correction = -5
+            distance_correction = -3
         elif distance_error < 15:
             continue_far = 0
     
