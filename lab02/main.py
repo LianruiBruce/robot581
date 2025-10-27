@@ -314,13 +314,13 @@ def follow_wall_diagnostic(target_distance_mm=300, wall_length_mm=2400, speed=DR
     MAX_WALL_MM = 600
     EDGE_RISE_MM = 35    # 显著变远阈值（短周期下调）
     EDGE_TICKS_HOLD = 10
-    EDGE_BIAS = -60      # 负=右转（你的速度定义）
+    EDGE_BIAS = 60      # 负=右转（你的速度定义）
 
     # 内拐角（真变近）
     CORNER_DROP_MM = -20
     CORNER_NEAR_MM = max(200, TARGET_DISTANCE - 80)
     CORNER_TICKS = 10
-    CORNER_BIAS = +60    # 正=左转
+    CORNER_BIAS = -60    # 正=左转
 
     # 方向反转（保留开关）
     REVERSE_CORRECTION = False
