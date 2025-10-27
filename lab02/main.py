@@ -276,13 +276,14 @@ def drive_until_collision_controlled(speed=DRIVE_SPEED):
 
 def follow_wall_diagnostic(target_distance_mm=300, wall_length_mm=2400, speed=DRIVE_SPEED):
     """
-    改进的墙壁跟随算法：
+    ✅ 正确修复版本的墙壁跟随算法：
       - 修复了外折墙壁时不能左转的问题
       - 移除了阻止"距离过远"纠正的逻辑
-      - 改进了真/假变远的判别
+      - ✅ 修复了EDGE_BIAS和CORNER_BIAS的符号错误
+      - ✅ 完善了edge_ticks的执行逻辑
     """
     print("="*50)
-    print("DIAGNOSTIC WALL FOLLOWING (FIXED)")
+    print("CORRECTLY FIXED WALL FOLLOWING")
     print("="*50)
     print("Target: " + str(target_distance_mm) + "mm")
     print("Length: " + str(wall_length_mm) + "mm")
@@ -313,19 +314,21 @@ def follow_wall_diagnostic(target_distance_mm=300, wall_length_mm=2400, speed=DR
     MAX_WALL_MM = 600
     EDGE_RISE_MM = 50    # 提高阈值，只在真正探空时触发
     EDGE_TICKS_HOLD = 10
-    EDGE_BIAS = 60      # 负=右转
+    EDGE_BIAS = -60      # ✅ 修复：负值 = 右转（原来错写成60）
 
     # 内拐角（真变近）
     CORNER_DROP_MM = -20
     CORNER_NEAR_MM = max(200, TARGET_DISTANCE - 80)
     CORNER_TICKS = 10
-    CORNER_BIAS = -60    # 正=左转
+    CORNER_BIAS = +60    # ✅ 修复：正值 = 左转（原来错写成-60）
 
     # 方向反转（保留开关）
     REVERSE_CORRECTION = False
 
     print("CORRECTION_GAIN:", CORRECTION_GAIN)
     print("MAX_CORRECTION:", MAX_CORRECTION)
+    print("EDGE_BIAS:", EDGE_BIAS, "(negative = right turn)")
+    print("CORNER_BIAS:", CORNER_BIAS, "(positive = left turn)")
     print("GYRO_ASSIST:", GYRO_ASSIST)
     print("REVERSE_CORRECTION:", REVERSE_CORRECTION)
     print("="*50)
@@ -371,15 +374,13 @@ def follow_wall_diagnostic(target_distance_mm=300, wall_length_mm=2400, speed=DR
             persist_pos = max(0, persist_pos - 1)
 
         # 判断是否是"真正的墙壁变远"（外折）vs "探空"（开放空间）
-        # 外折：距离缓慢增加，没有急剧变远
-        # 探空：距离急剧增加到很远
         is_true_far = (
             persist_pos >= K_PERSIST or
             (delta_d > POS_STEP and abs(delta_theta_step) >= THETA_SMALL)
         )
         
         # 探空检测：只有在距离变得非常远时才判断为探空
-        is_open_space = current_distance >= MAX_WALL_MM * 0.8  # 480mm以上
+        is_open_space = current_distance >= MAX_WALL_MM * 0.8
 
         # 内拐角：快速变近且已较近 → 左转增强
         if corner_ticks == 0:
@@ -397,13 +398,7 @@ def follow_wall_diagnostic(target_distance_mm=300, wall_length_mm=2400, speed=DR
         distance_correction = distance_error * CORRECTION_GAIN
 
         # ✅ 修复：移除了阻止"距离过远"纠正的逻辑
-        # 原来的代码在这里会清零distance_correction，导致外折墙壁时不能左转
-        # if distance_correction > 15 and continue_far < 3:
-        #     continue_far += 1
-        #     distance_correction = 0  # ❌ 这是问题所在！
-        # else:
-        #     continue_far = 0
-
+        
         distance_correction = clamp(distance_correction, -MAX_CORRECTION, MAX_CORRECTION)
 
         # Gyro assist（保持关闭）
@@ -415,13 +410,15 @@ def follow_wall_diagnostic(target_distance_mm=300, wall_length_mm=2400, speed=DR
         if abs(gyro_deviation) > 60:
             total_correction = 0
 
-        # 角点/边缘微策略
+        # ✅ 修复：角点/边缘微策略（完整逻辑）
         if corner_ticks > 0:
-            total_correction += CORNER_BIAS   # 左转
+            total_correction += CORNER_BIAS   # ✅ +60 = 左转
             corner_ticks -= 1
-        elif edge_ticks > 0:
-            # 只在探空时右转，不在外折墙壁时右转
-            total_correction += EDGE_BIAS     # 右转
+        elif edge_ticks > 0 and not is_true_far:  # ✅ 添加 "and not is_true_far"
+            total_correction += EDGE_BIAS          # ✅ -60 = 右转
+            # ✅ 添加距离抑制逻辑
+            if current_distance > last_distance:
+                current_distance = last_distance
             edge_ticks -= 1
 
         # 纠偏爬升限速
@@ -527,7 +524,8 @@ def main():
     try:
         ev3.speaker.beep()
         print("="*50)
-        print("FIXED VERSION - 外折墙壁问题已修复")
+        print("CORRECTLY FIXED VERSION")
+        print("所有问题已修复！")
         print("="*50)
         print("")
         print("Press CENTER to start...")
@@ -576,12 +574,14 @@ def main():
         # ============== Objective 3: Fixed Wall Following ==============
         print("")
         print("="*50)
-        print("OBJECTIVE 3: Fixed Wall Following")
+        print("OBJECTIVE 3: Correctly Fixed Wall Following")
         print("="*50)
-        print("修复：")
-        print("1. 移除了阻止'距离过远'纠正的逻辑")
-        print("2. 改进了外折墙壁 vs 探空的判别")
-        print("3. 现在能正确左转靠近外折墙壁")
+        print("修复内容：")
+        print("1. ✅ 移除了清零逻辑")
+        print("2. ✅ EDGE_BIAS = -60 (右转)")
+        print("3. ✅ CORNER_BIAS = +60 (左转)")
+        print("4. ✅ edge_ticks添加'and not is_true_far'")
+        print("5. ✅ 添加距离抑制逻辑")
         print("="*50)
 
         wait(10)
