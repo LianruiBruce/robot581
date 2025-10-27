@@ -24,8 +24,8 @@ WHEEL_DIAMETER_MM = 56.0
 AXLE_TRACK_MM = 125.0
 
 # Movement Parameters
-DRIVE_SPEED = 200  # degrees per second
-TURN_SPEED = 150   # degrees per second
+DRIVE_SPEED = 180  # degrees per second
+TURN_SPEED = 80   # degrees per second
 
 # ============================ INITIALIZATION =============================
 
@@ -44,8 +44,13 @@ ultrasonic = UltrasonicSensor(ULTRA_PORT)
 
 # Reset gyro sensor
 gyro.reset_angle(0)
+wait(10)
 
 # ============================ HELPER FUNCTIONS =============================
+
+
+
+
 
 def drive_straight_pid(distance_mm, speed=DRIVE_SPEED):
     """Drive straight for a specific distance using gyro PID control."""
@@ -215,9 +220,11 @@ def drive_until_collision_controlled(speed=DRIVE_SPEED):
     """Drive forward until collision."""
     print("Driving forward until collision...")
     
+    wait(10)
     left_motor.reset_angle(0)
     right_motor.reset_angle(0)
     initial_gyro = gyro.angle()
+    wait(10)
     
     GYRO_KP = 2.5
     
@@ -241,17 +248,17 @@ def drive_until_collision_controlled(speed=DRIVE_SPEED):
         left_motor.run(left_speed)
         right_motor.run(right_speed)
         
-        wait(20)
+        wait(10)
 
 
-def follow_wall_diagnostic(target_distance_mm=300, wall_length_mm=2200, speed=DRIVE_SPEED):
+def follow_wall_diagnostic(target_distance_mm=300, wall_length_mm=2400, speed=DRIVE_SPEED):
     """
-    诊断版本 - 输出详细信息
+    Diagnostic version - outputs detailed information
     
-    添加了：
-    1. 每次迭代都输出左右轮速度
-    2. 增加修正增益，让转向更明显
-    3. 提供符号反转选项
+    Added:
+    1. Print left/right wheel speeds every iteration
+    2. Increased correction gain for stronger steering
+    3. Option to reverse correction sign
     """
     print("="*50)
     print("DIAGNOSTIC WALL FOLLOWING")
@@ -259,23 +266,26 @@ def follow_wall_diagnostic(target_distance_mm=300, wall_length_mm=2200, speed=DR
     print("Target: " + str(target_distance_mm) + "mm")
     print("Length: " + str(wall_length_mm) + "mm")
     
-    # ========== 关键参数 ==========
+    # ========== Key Parameters ==========
     TARGET_DISTANCE = target_distance_mm
     
-    # 增加修正增益，让效果更明显！
-    CORRECTION_GAIN = 1.8  # 大幅增加！让转向更明显
-    MAX_CORRECTION = 150    # 增加最大修正
+    # Increase correction gain to make steering more obvious
+    # TODO: need adjust
+    CORRECTION_GAIN = 1.4
+    MAX_CORRECTION = 100
     
-    # 陀螺仪辅助暂时禁用，先测试纯距离控制
-    GYRO_ASSIST = 0.0  # 先设为0，只用距离控制
+    # Gyro assist temporarily disabled, test distance-only control first
+    GYRO_ASSIST = 0.0
     
-    # 符号反转选项
-    REVERSE_CORRECTION = False  # 如果方向反了，改成True
+    # Reverse correction option
+    REVERSE_CORRECTION = False  # If direction is wrong, change to True
+
+    ALPHA = 0.35
     
-    # ⚠️ 如果机器人还是不转，尝试以下操作：
-    # 1. 把 CORRECTION_GAIN 增加到 2.5
-    # 2. 把 REVERSE_CORRECTION 改成 True
-    # 3. 把下面的 min_speed 改成 30
+    # ⚠️ If the robot still doesn’t turn properly, try:
+    # 1. Increase CORRECTION_GAIN to 2.5
+    # 2. Change REVERSE_CORRECTION to True
+    # 3. Change min_speed below to 30
     
     print("CORRECTION_GAIN: " + str(CORRECTION_GAIN))
     print("MAX_CORRECTION: " + str(MAX_CORRECTION))
@@ -283,62 +293,68 @@ def follow_wall_diagnostic(target_distance_mm=300, wall_length_mm=2200, speed=DR
     print("REVERSE_CORRECTION: " + str(REVERSE_CORRECTION))
     print("="*50)
     
-    # 初始化
+    # Initialization
     left_motor.reset_angle(0)
     right_motor.reset_angle(0)
     
     parallel_gyro_reference = gyro.angle()
+    last_distance = TARGET_DISTANCE
     
     iteration = 0
     
     while True:
         iteration += 1
         
-        # 读取距离
+        # Read distance
         try:
             current_distance = ultrasonic.distance()
         except:
-            current_distance = TARGET_DISTANCE
+            current_distance = last_distance
         
-        if current_distance <= 0 or current_distance > 2000:
-            current_distance = TARGET_DISTANCE
-        
-        # 计算距离误差
+        if current_distance <= 0 or current_distance > 600:
+            current_distance = last_distance
+        else:
+            current_distance = ALPHA*current_distance + (1-ALPHA)*last_distance
+
+        # Compute distance error
         distance_error = current_distance - TARGET_DISTANCE
         
-        # 计算修正
+        # Compute correction
         distance_correction = distance_error * CORRECTION_GAIN
         
-        # 限制修正
+        # Limit correction
         distance_correction = max(-MAX_CORRECTION, min(MAX_CORRECTION, distance_correction))
         
-        # 陀螺仪辅助（当前禁用）
+        # Gyro assist (currently disabled)
         current_gyro = gyro.angle()
         gyro_deviation = current_gyro - parallel_gyro_reference
         gyro_correction = gyro_deviation * GYRO_ASSIST
         
-        # 总修正
+        # Total correction
         total_correction = distance_correction + gyro_correction
         
-        # 符号反转选项
+        if gyro_deviation>60 or gyro_deviation<-60:
+            total_correction=0
+        
+        # Reverse correction if enabled
         if REVERSE_CORRECTION:
             total_correction = -total_correction
         
-        # 应用到电机
+        # Apply to motors
         left_speed = speed - total_correction
         right_speed = speed + total_correction
         
-        # 限制速度（允许更大的差异）
-        min_speed = 40  # 降低最小速度
-        max_speed = speed * 1.6  # 提高最大速度
+        # Limit speed (allow larger difference)
+        min_speed = 40
+        max_speed = speed * 1.6
         left_speed = max(min_speed, min(max_speed, left_speed))
         right_speed = max(min_speed, min(max_speed, right_speed))
         
-        # 运行电机
+        # Run motors
         left_motor.run(left_speed)
         right_motor.run(right_speed)
         
-        # ========== 详细输出（每次迭代） ==========
+        # ========== Detailed output ==========
         print("="*50)
         print("Iter: " + str(iteration))
         print("Distance: " + str(int(current_distance)) + "mm")
@@ -347,7 +363,7 @@ def follow_wall_diagnostic(target_distance_mm=300, wall_length_mm=2200, speed=DR
         print("Left Speed: " + str(int(left_speed)))
         print("Right Speed: " + str(int(right_speed)))
         
-        # 判断应该往哪转
+        # Expected turning direction
         if distance_error < -20:
             print(">>> TOO CLOSE - Should turn RIGHT (away)")
             print(">>> Expected: Left FASTER, Right SLOWER")
@@ -357,7 +373,7 @@ def follow_wall_diagnostic(target_distance_mm=300, wall_length_mm=2200, speed=DR
         else:
             print(">>> GOOD DISTANCE")
         
-        # 实际电机速度对比
+        # Actual turning direction
         if left_speed > right_speed + 20:
             print(">>> ACTUAL: Turning RIGHT")
         elif right_speed > left_speed + 20:
@@ -367,13 +383,14 @@ def follow_wall_diagnostic(target_distance_mm=300, wall_length_mm=2200, speed=DR
         
         print("="*50)
         
-        # 屏幕显示
+        # Display on screen
         ev3.screen.clear()
         ev3.screen.draw_text(5, 5, "D:" + str(current_distance))
-        ev3.screen.draw_text(5, 20, "Err:" + str(int(distance_error)))
-        ev3.screen.draw_text(5, 35, "Corr:" + str(int(total_correction)))
-        ev3.screen.draw_text(5, 50, "L:" + str(int(left_speed)))
-        ev3.screen.draw_text(5, 65, "R:" + str(int(right_speed)))
+        # ev3.screen.draw_text(5, 20, "Err:" + str(int(distance_error)))
+        # ev3.screen.draw_text(5, 35, "Corr:" + str(int(total_correction)))
+        # ev3.screen.draw_text(5, 50, "L:" + str(int(left_speed)))
+        # ev3.screen.draw_text(5, 65, "R:" + str(int(right_speed)))
+        ev3.screen.draw_text(5, 50, "X: "+ str(ultrasonic.distance()))
         
         if current_distance < TARGET_DISTANCE - 20:
             ev3.screen.draw_text(5, 80, "TOO CLOSE >>")
@@ -382,19 +399,20 @@ def follow_wall_diagnostic(target_distance_mm=300, wall_length_mm=2200, speed=DR
         else:
             ev3.screen.draw_text(5, 80, "GOOD")
         
-        # 计算行进距离
+        # Compute traveled distance
         avg_motor_angle = (abs(left_motor.angle()) + abs(right_motor.angle())) / 2
         wheel_circumference = math.pi * WHEEL_DIAMETER_MM
         distance_traveled = (avg_motor_angle / 360) * wheel_circumference
+        last_distance = current_distance
         
-        # 检查完成
+        # Check completion
         if distance_traveled >= wall_length_mm:
             left_motor.stop(Stop.BRAKE)
             right_motor.stop(Stop.BRAKE)
             print("COMPLETE!")
             break
         
-        wait(100)  # 增加延迟，方便观察输出
+        wait(10)
     
     left_motor.stop(Stop.BRAKE)
     right_motor.stop(Stop.BRAKE)
@@ -403,7 +421,7 @@ def follow_wall_diagnostic(target_distance_mm=300, wall_length_mm=2200, speed=DR
 # ============================ MAIN PROGRAM =============================
 
 def main():
-    """主程序"""
+    """Main program"""
     try:
         ev3.speaker.beep()
         print("="*50)
@@ -421,7 +439,7 @@ def main():
         ev3.speaker.beep()
         wait(3000)
         
-        # ============== 目标1：检测墙壁 ==============
+        # ============== Objective 1: Detect Wall ==============
         print("")
         print("="*50)
         print("OBJECTIVE 1: Detect Wall")
@@ -436,7 +454,7 @@ def main():
         drive_straight_pid(-300, speed=DRIVE_SPEED)
         wait(500)
         
-        # ============== 目标2：右转90度 ==============
+        # ============== Objective 2: Turn Right 90° ==============
         print("")
         print("="*50)
         print("OBJECTIVE 2: Turn Right 90°")
@@ -454,7 +472,7 @@ def main():
         print("Turn complete!")
         wait(500)
         
-        # ============== 目标3：诊断墙壁跟随 ==============
+        # ============== Objective 3: Diagnostic Wall Following ==============
         print("")
         print("="*50)
         print("OBJECTIVE 3: Diagnostic Wall Following")
@@ -468,13 +486,15 @@ def main():
         print("- Expected vs Actual turning direction")
         print("="*50)
         
+        wait(10)
         follow_wall_diagnostic(
             target_distance_mm=300,
-            wall_length_mm=2200,
+            wall_length_mm=2400,
             speed=DRIVE_SPEED
         )
+        wait(10)
         
-        # ============== 成功！ ==============
+        # ============== SUCCESS! ==============
         print("")
         print("="*50)
         print("SUCCESS!")
