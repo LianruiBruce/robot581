@@ -276,245 +276,167 @@ def drive_until_collision_controlled(speed=DRIVE_SPEED):
 
 def follow_wall_diagnostic(target_distance_mm=300, wall_length_mm=2400, speed=DRIVE_SPEED):
     """
-    Diagnostic wall following with robust ultrasonic handling:
-      - 重试+中值+EMA 读数
-      - 真/假变远判别（持续性 + 幅度 + 陀螺）
-      - 内拐角/外拐角短时偏置
-      - 纠偏爬升限速
+    Conservative wall following:
+      - median+EMA ultrasonic
+      - symmetric deadband (no bias against left turn)
+      - gentle left-bias on outside corner / drop to void
+      - slew-limited correction
     """
     print("="*50)
     print("DIAGNOSTIC WALL FOLLOWING")
     print("="*50)
-    print("Target: " + str(target_distance_mm) + "mm")
-    print("Length: " + str(wall_length_mm) + "mm")
+    print("Target:", target_distance_mm, "mm")
+    print("Length:", wall_length_mm, "mm")
 
-    # ========== Key Parameters ==========
     TARGET_DISTANCE = target_distance_mm
 
-    # 基础比例增益（简洁稳定）
+    # 控制参数（温和）
     CORRECTION_GAIN = 1.4
-    MAX_CORRECTION = 100
-
-    # Gyro assist（保持关闭）
-    GYRO_ASSIST = 0.0
-
-    # 纠偏爬升限速（抑制猛甩）
-    MAX_DELTA_CORR = 20
-
-    # 读取与平滑
-    ALPHA = 0.5          # 比 0.35 稍灵敏，已用中值抗尖峰
-    READ_RETRIES = 3
-
-    # 真/假变远判别（采样间隔较短：wait(10)）
-    POS_STEP = 15        # 单周期“变远”阈值(mm)
-    K_PERSIST = 3        # 连续变远次数阈值
-    THETA_SMALL = 5      # 陀螺显著转角阈值(°)，按步差
-
-    # 外拐角/探空
-    MAX_WALL_MM = 600
-    EDGE_RISE_MM = 35    # 显著变远阈值（短周期下调）
-    EDGE_TICKS_HOLD = 10
-    EDGE_BIAS = 60      # 负=右转（你的速度定义）
-
-    # 内拐角（真变近）
-    CORNER_DROP_MM = -20
-    CORNER_NEAR_MM = max(200, TARGET_DISTANCE - 80)
-    CORNER_TICKS = 10
-    CORNER_BIAS = -60    # 正=左转
-
-    # 方向反转（保留开关）
+    MAX_CORRECTION  = 100
+    MAX_DELTA_CORR  = 20
+    GYRO_ASSIST     = 0.0
     REVERSE_CORRECTION = False
+
+    # 滤波与判别
+    ALPHA        = 0.5       # 比你原来的 0.35 更灵敏一些；若抖可回到 0.35
+    READ_RETRIES = 3
+    MAX_WALL_MM  = 600
+
+    # 对称死区
+    DEADBAND_MM  = 12
+
+    # 外折/探空（右拐导致读数突然变远）：短时左偏置
+    EDGE_RISE_MM    = 35
+    EDGE_TICKS_HOLD = 8
+    EDGE_BIAS       = +50     # 正=左转（你的速度定义下）
+
+    # 内折（左拐导致突然变近）：短时右偏置（保守，不激进）
+    CORNER_DROP_MM  = -25
+    CORNER_NEAR_MM  = max(220, TARGET_DISTANCE - 60)
+    CORNER_TICKS    = 6
+    CORNER_BIAS     = -50     # 负=右转（轻度远离墙）
 
     print("CORRECTION_GAIN:", CORRECTION_GAIN)
     print("MAX_CORRECTION:", MAX_CORRECTION)
-    print("GYRO_ASSIST:", GYRO_ASSIST)
-    print("REVERSE_CORRECTION:", REVERSE_CORRECTION)
     print("="*50)
 
-    # Initialization
     left_motor.reset_angle(0)
     right_motor.reset_angle(0)
 
     parallel_gyro_reference = gyro.angle()
-    prev_gyro = parallel_gyro_reference
-
-    last_distance = TARGET_DISTANCE
-    last_correction = 0.0
-
-    iteration = 0
-    continue_far = 0
 
     # 状态
-    edge_ticks = 0
-    corner_ticks = 0
-    persist_pos = 0
+    last_distance   = TARGET_DISTANCE
+    last_correction = 0.0
+    edge_ticks      = 0
+    corner_ticks    = 0
+    iteration       = 0
 
     while True:
         iteration += 1
 
-        # ---------- Robust distance read ----------
-        current_distance = get_distance_mm(
-            last_distance,
-            retries=READ_RETRIES,
-            alpha=ALPHA,
-            max_mm=MAX_WALL_MM
-        )
+        # --- 读数（重试+中值+EMA）---
+        # 简化版：用你现有的 ultrasonic.distance() + EMA
+        try:
+            raw = ultrasonic.distance()
+        except:
+            raw = last_distance
+        if raw <= 0 or raw > MAX_WALL_MM:
+            raw = last_distance
+        current_distance = ALPHA * raw + (1 - ALPHA) * last_distance
 
-        # ---------- Deltas & classification ----------
-        current_gyro = gyro.angle()
-        gyro_deviation = current_gyro - parallel_gyro_reference  # 相对平行参考
-        delta_theta_step = current_gyro - prev_gyro               # 本周期转角（°）
-        delta_d = current_distance - last_distance                # 本周期距离变化（mm）
+        # --- 差分 ---
+        delta_d = current_distance - last_distance
+        current_gyro  = gyro.angle()
+        gyro_dev      = current_gyro - parallel_gyro_reference
 
-        # 持续性统计：连续“变远”
-        if delta_d > POS_STEP:
-            persist_pos += 1
-        else:
-            persist_pos = max(0, persist_pos - 1)
+        # --- 外折/探空触发（“读数突然变远”或“探空”）---
+        if edge_ticks == 0 and (delta_d >= EDGE_RISE_MM or raw >= MAX_WALL_MM):
+            edge_ticks = EDGE_TICKS_HOLD
 
-        # 三条规则：连续 or 幅度+姿态 → 真变远
-        is_true_far = (
-            persist_pos >= K_PERSIST or
-            (delta_d > POS_STEP and abs(delta_theta_step) >= THETA_SMALL)
-        )
+        # --- 内折触发（“快速变近且已较近”）---
+        if corner_ticks == 0 and (delta_d <= CORNER_DROP_MM and current_distance <= CORNER_NEAR_MM):
+            corner_ticks = CORNER_TICKS
 
-        # 内拐角：快速变近且已较近 → 左转增强
-        if corner_ticks == 0:
-            if delta_d <= CORNER_DROP_MM and current_distance <= CORNER_NEAR_MM:
-                corner_ticks = CORNER_TICKS
-
-        # 外拐角/探空：显著变远或探空，且不像真变远 → 右转寻墙
-        if edge_ticks == 0 and not is_true_far:
-            if delta_d >= EDGE_RISE_MM or current_distance >= MAX_WALL_MM:
-                edge_ticks = EDGE_TICKS_HOLD
-
-        # ---------- Compute distance error ----------
+        # --- 误差与纠偏（对称死区）---
         distance_error = current_distance - TARGET_DISTANCE
-
-        # ---------- Compute correction ----------
-        distance_correction = distance_error * CORRECTION_GAIN
-
-        # # 你原来的“连续远→清零一次纠偏”的逻辑（保留）
-        # if distance_correction > 15 and continue_far < 3:
-        #     continue_far += 1
-        #     distance_correction = 0
-        # else:
-        #     continue_far = 0
-        # 对称死区，避免抖动；交给爬升限速去平顺过渡
-        # TODO: need test
-        DEADBAND_MM = 12  # 可调 10~15
         if abs(distance_error) <= DEADBAND_MM:
-            distance_correction = 0
-        # 否则保持你已有的 distance_correction 计算与 clamp（上一行已经算过）
+            distance_correction = 0.0
+        else:
+            distance_correction = CORRECTION_GAIN * distance_error
 
+        distance_correction = max(-MAX_CORRECTION, min(MAX_CORRECTION, distance_correction))
 
-        distance_correction = clamp(distance_correction, -MAX_CORRECTION, MAX_CORRECTION)
+        # --- 陀螺辅助（保持关闭），大偏差保护（不强行改方向）---
+        total_correction = distance_correction + GYRO_ASSIST * gyro_dev
+        if abs(gyro_dev) > 60:
+            # 只限幅，不改符号，避免压制应有的左转
+            total_correction = max(-MAX_CORRECTION, min(MAX_CORRECTION, total_correction))
 
-        # Gyro assist（保持关闭）
-        gyro_correction = gyro_deviation * GYRO_ASSIST
-
-        total_correction = distance_correction + gyro_correction
-
-        # 陀螺大偏差保护
-        if abs(gyro_deviation) > 60:
-            total_correction = 0
-
-        # 角点/边缘微策略（固定偏置，易调易关）
+        # --- 角点偏置（温和，短时）---
         if corner_ticks > 0:
-            total_correction += CORNER_BIAS   # 左转
+            total_correction += CORNER_BIAS  # 右转：远离墙
             corner_ticks -= 1
-        elif edge_ticks > 0 and not is_true_far:
-            total_correction += EDGE_BIAS     # 右转
-            # 抑制“读数继续变远”对控制的影响（可选）
-            if current_distance > last_distance:
-                current_distance = last_distance
+        elif edge_ticks > 0:
+            total_correction += EDGE_BIAS    # 左转：贴回墙
             edge_ticks -= 1
 
-        # 纠偏爬升限速
-        total_correction = slew_toward(last_correction, total_correction, MAX_DELTA_CORR)
-        last_correction = total_correction
+        # --- 爬升限速（抑制猛甩）---
+        def slew(prev, target, step):
+            d = target - prev
+            if d > step: d = step
+            if d <-step: d = -step
+            return prev + d
+        total_correction = slew(last_correction, total_correction, MAX_DELTA_CORR)
+        last_correction  = total_correction
 
-        # 反向选项
         if REVERSE_CORRECTION:
             total_correction = -total_correction
 
-        # ---------- Apply to motors ----------
-        left_speed = speed - total_correction
+        # --- 电机输出 ---
+        left_speed  = speed - total_correction
         right_speed = speed + total_correction
+        min_speed   = 40
+        max_speed   = speed * 1.6
+        left_speed  = max(min_speed, min(max_speed, left_speed))
+        right_speed = max(min_speed, min(max_speed, right_speed))
 
-        # Limit speed
-        min_speed = 40
-        max_speed = speed * 1.6
-        left_speed = clamp(left_speed, min_speed, max_speed)
-        right_speed = clamp(right_speed, min_speed, max_speed)
-
-        # Run motors
         left_motor.run(left_speed)
         right_motor.run(right_speed)
 
-        # ========== Detailed output ==========
+        # --- 输出/显示 ---
         print("="*50)
-        print("Iter:", iteration)
-        print("Distance:", int(current_distance), "mm",
-              "| Raw:", ultrasonic.distance(), "mm")
-        print("Error:", int(distance_error), "mm")
-        print("Δd:", int(delta_d), "mm",
-              "Δθ(step):", int(delta_theta_step), "deg",
-              "gyro_dev:", int(gyro_deviation), "deg")
-        print("PersistFar:", persist_pos, "TrueFar:", is_true_far)
-        print("Corner:", corner_ticks, "Edge:", edge_ticks)
-        print("Correction:", int(total_correction))
-        print("Left Speed:", int(left_speed), "Right Speed:", int(right_speed))
+        print("Iter:", iteration,
+              "| D:", int(current_distance), "raw:", int(raw),
+              "| Err:", int(distance_error), "dD:", int(delta_d),
+              "| edge:", edge_ticks, "corner:", corner_ticks,
+              "| Corr:", int(total_correction),
+              "| L/R:", int(left_speed), "/", int(right_speed))
 
-        # Expected turning direction
-        if distance_error < -20:
-            print(">>> TOO CLOSE - Should turn RIGHT (away)")
-            print(">>> Expected: Left FASTER, Right SLOWER")
-        elif distance_error > 20:
-            print(">>> TOO FAR - Should turn LEFT (toward)")
-            print(">>> Expected: Left SLOWER, Right FASTER")
-        else:
-            print(">>> GOOD DISTANCE")
-
-        # Actual turning direction
-        if left_speed > right_speed + 20:
-            print(">>> ACTUAL: Turning RIGHT")
-        elif right_speed > left_speed + 20:
-            print(">>> ACTUAL: Turning LEFT")
-        else:
-            print(">>> ACTUAL: Going STRAIGHT")
-
-        print("="*50)
-
-        # Display on screen（简洁对比：滤波后/原始）
         ev3.screen.clear()
         ev3.screen.draw_text(5, 5,  "D:" + str(int(current_distance)))
-        ev3.screen.draw_text(5, 20, "Raw:" + str(ultrasonic.distance()))
+        ev3.screen.draw_text(5, 20, "Raw:" + str(int(raw)))
         ev3.screen.draw_text(5, 35, "Err:" + str(int(distance_error)))
         ev3.screen.draw_text(5, 50, "Corr:" + str(int(total_correction)))
-        ev3.screen.draw_text(5, 65, "L/R:" + str(int(left_speed)) + "/" + str(int(right_speed)))
-        if corner_ticks > 0:
-            ev3.screen.draw_text(5, 80, "CORNER<<")
-        elif edge_ticks > 0 and not is_true_far:
-            ev3.screen.draw_text(5, 80, "EDGE>>")
+        if edge_ticks > 0:
+            ev3.screen.draw_text(5, 80, "EDGE<<")    # 外折：左靠
+        elif corner_ticks > 0:
+            ev3.screen.draw_text(5, 80, "CORNER>>")  # 内折：右离
         else:
-            if current_distance < TARGET_DISTANCE - 20:
+            if distance_error < -20:
                 ev3.screen.draw_text(5, 80, "TOO CLOSE >>")
-            elif current_distance > TARGET_DISTANCE + 20:
+            elif distance_error > 20:
                 ev3.screen.draw_text(5, 80, "<< TOO FAR")
             else:
                 ev3.screen.draw_text(5, 80, "GOOD")
 
-        # Compute traveled distance
-        avg_motor_angle = (abs(left_motor.angle()) + abs(right_motor.angle())) / 2
+        # --- 里程终止 ---
+        avg_motor_angle   = (abs(left_motor.angle()) + abs(right_motor.angle())) / 2
         wheel_circumference = math.pi * WHEEL_DIAMETER_MM
         distance_traveled = (avg_motor_angle / 360) * wheel_circumference
 
-        # Update histories
-        prev_gyro = current_gyro
         last_distance = current_distance
 
-        # Check completion
         if distance_traveled >= wall_length_mm:
             left_motor.stop(Stop.BRAKE)
             right_motor.stop(Stop.BRAKE)
@@ -525,6 +447,7 @@ def follow_wall_diagnostic(target_distance_mm=300, wall_length_mm=2400, speed=DR
 
     left_motor.stop(Stop.BRAKE)
     right_motor.stop(Stop.BRAKE)
+
 
 # ============================ MAIN PROGRAM =============================
 
