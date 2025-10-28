@@ -66,13 +66,12 @@ def get_distance_mm(last_distance, retries=3, alpha=0.5, min_mm=40, max_mm=600):
                 vals.append(v)
         except:
             pass
-        wait(5)  # 给 I2C/回波一点时间
+        wait(5)
     if not vals:
         raw = last_distance
     else:
         vals.sort()
-        raw = vals[len(vals)//2]  # 中值抗尖峰
-    # EMA 平滑
+        raw = vals[len(vals)//2]
     return alpha * raw + (1 - alpha) * last_distance
 
 def slew_toward(prev, target, max_step):
@@ -274,16 +273,16 @@ def drive_until_collision_controlled(speed=DRIVE_SPEED):
 
         wait(10)
 
-def follow_wall_diagnostic(target_distance_mm=300, wall_length_mm=2400, speed=DRIVE_SPEED):
+def follow_wall_enhanced(target_distance_mm=300, wall_length_mm=2400, speed=DRIVE_SPEED):
     """
-    ✅ 正确修复版本的墙壁跟随算法：
-      - 修复了外折墙壁时不能左转的问题
-      - 移除了阻止"距离过远"纠正的逻辑
-      - ✅ 修复了EDGE_BIAS和CORNER_BIAS的符号错误
-      - ✅ 完善了edge_ticks的执行逻辑
+    增强调试版本：
+    - 降低触发阈值，更容易触发corner和edge
+    - 增大BIAS值，效果更明显
+    - 增加MAX_DELTA_CORR，允许更快的响应
+    - 添加详细的触发诊断信息
     """
     print("="*50)
-    print("CORRECTLY FIXED WALL FOLLOWING")
+    print("ENHANCED DEBUG WALL FOLLOWING")
     print("="*50)
     print("Target: " + str(target_distance_mm) + "mm")
     print("Length: " + str(wall_length_mm) + "mm")
@@ -291,46 +290,46 @@ def follow_wall_diagnostic(target_distance_mm=300, wall_length_mm=2400, speed=DR
     # ========== Key Parameters ==========
     TARGET_DISTANCE = target_distance_mm
 
-    # 基础比例增益
-    CORRECTION_GAIN = 1.4
-    MAX_CORRECTION = 100
+    # 基础比例增益 - 加大以获得更强的响应
+    CORRECTION_GAIN = 2.0  # 从1.4增加到2.0
+    MAX_CORRECTION = 120   # 从100增加到120
 
     # Gyro assist（保持关闭）
     GYRO_ASSIST = 0.0
 
-    # 纠偏爬升限速（抑制猛甩）
-    MAX_DELTA_CORR = 20
+    # 纠偏爬升限速 - 增大以允许更快响应
+    MAX_DELTA_CORR = 40    # 从20增加到40
 
     # 读取与平滑
-    ALPHA = 0.5
+    ALPHA = 0.6            # 从0.5增加到0.6，更灵敏
     READ_RETRIES = 3
 
-    # 真/假变远判别
-    POS_STEP = 15        # 单周期"变远"阈值(mm)
-    K_PERSIST = 3        # 连续变远次数阈值
-    THETA_SMALL = 5      # 陀螺显著转角阈值(°)
+    # 真/假变远判别 - 降低阈值使其更容易触发
+    POS_STEP = 10          # 从15降低到10
+    K_PERSIST = 2          # 从3降低到2
+    THETA_SMALL = 3        # 从5降低到3
 
-    # 外拐角/探空（只用于检测开放空间，不是外折墙壁）
+    # 外拐角/探空 - 降低阈值
     MAX_WALL_MM = 600
-    EDGE_RISE_MM = 50    # 提高阈值，只在真正探空时触发
-    EDGE_TICKS_HOLD = 10
-    EDGE_BIAS = -60      # ✅ 修复：负值 = 右转（原来错写成60）
+    EDGE_RISE_MM = 30      # 从50降低到30
+    EDGE_TICKS_HOLD = 15   # 从10增加到15，持续更久
+    EDGE_BIAS = -100       # 从-60增加到-100，效果更强
 
-    # 内拐角（真变近）
-    CORNER_DROP_MM = -20
-    CORNER_NEAR_MM = max(200, TARGET_DISTANCE - 80)
-    CORNER_TICKS = 10
-    CORNER_BIAS = +60    # ✅ 修复：正值 = 左转（原来错写成-60）
+    # 内拐角 - 降低阈值，增大效果
+    CORNER_DROP_MM = -15   # 从-20改到-15，更容易触发
+    CORNER_NEAR_MM = max(180, TARGET_DISTANCE - 100)  # 更宽松
+    CORNER_TICKS = 15      # 从10增加到15，持续更久
+    CORNER_BIAS = +100     # 从+60增加到+100，效果更强
 
     # 方向反转（保留开关）
     REVERSE_CORRECTION = False
 
     print("CORRECTION_GAIN:", CORRECTION_GAIN)
     print("MAX_CORRECTION:", MAX_CORRECTION)
-    print("EDGE_BIAS:", EDGE_BIAS, "(negative = right turn)")
-    print("CORNER_BIAS:", CORNER_BIAS, "(positive = left turn)")
-    print("GYRO_ASSIST:", GYRO_ASSIST)
-    print("REVERSE_CORRECTION:", REVERSE_CORRECTION)
+    print("MAX_DELTA_CORR:", MAX_DELTA_CORR)
+    print("EDGE_BIAS:", EDGE_BIAS, "(stronger right turn)")
+    print("CORNER_BIAS:", CORNER_BIAS, "(stronger left turn)")
+    print("POS_STEP:", POS_STEP, "(easier to trigger)")
     print("="*50)
 
     # Initialization
@@ -349,6 +348,10 @@ def follow_wall_diagnostic(target_distance_mm=300, wall_length_mm=2400, speed=DR
     edge_ticks = 0
     corner_ticks = 0
     persist_pos = 0
+    
+    # 统计触发次数
+    total_corner_triggers = 0
+    total_edge_triggers = 0
 
     while True:
         iteration += 1
@@ -379,25 +382,30 @@ def follow_wall_diagnostic(target_distance_mm=300, wall_length_mm=2400, speed=DR
             (delta_d > POS_STEP and abs(delta_theta_step) >= THETA_SMALL)
         )
         
-        # 探空检测：只有在距离变得非常远时才判断为探空
+        # 探空检测
         is_open_space = current_distance >= MAX_WALL_MM * 0.8
 
-        # 内拐角：快速变近且已较近 → 左转增强
+        # 内拐角检测 - 加上声音提示
         if corner_ticks == 0:
             if delta_d <= CORNER_DROP_MM and current_distance <= CORNER_NEAR_MM:
                 corner_ticks = CORNER_TICKS
+                total_corner_triggers += 1
+                ev3.speaker.beep(frequency=1000, duration=50)  # 高音beep表示内拐角
+                print("!!! CORNER DETECTED !!! delta_d=" + str(int(delta_d)) + 
+                      " dist=" + str(int(current_distance)))
 
-        # 探空检测：只在真正的开放空间时右转寻墙
+        # 探空检测 - 加上声音提示
         if edge_ticks == 0 and is_open_space:
             edge_ticks = EDGE_TICKS_HOLD
+            total_edge_triggers += 1
+            ev3.speaker.beep(frequency=500, duration=50)  # 低音beep表示探空
+            print("!!! EDGE DETECTED !!! dist=" + str(int(current_distance)))
 
         # ---------- Compute distance error ----------
         distance_error = current_distance - TARGET_DISTANCE
 
         # ---------- Compute correction ----------
         distance_correction = distance_error * CORRECTION_GAIN
-
-        # ✅ 修复：移除了阻止"距离过远"纠正的逻辑
         
         distance_correction = clamp(distance_correction, -MAX_CORRECTION, MAX_CORRECTION)
 
@@ -410,16 +418,18 @@ def follow_wall_diagnostic(target_distance_mm=300, wall_length_mm=2400, speed=DR
         if abs(gyro_deviation) > 60:
             total_correction = 0
 
-        # ✅ 修复：角点/边缘微策略（完整逻辑）
+        # 角点/边缘微策略
+        active_mode = "NORMAL"
         if corner_ticks > 0:
-            total_correction += CORNER_BIAS   # ✅ +60 = 左转
+            total_correction += CORNER_BIAS
             corner_ticks -= 1
-        elif edge_ticks > 0 and not is_true_far:  # ✅ 添加 "and not is_true_far"
-            total_correction += EDGE_BIAS          # ✅ -60 = 右转
-            # ✅ 添加距离抑制逻辑
+            active_mode = "CORNER (left turn boost)"
+        elif edge_ticks > 0 and not is_true_far:
+            total_correction += EDGE_BIAS
             if current_distance > last_distance:
                 current_distance = last_distance
             edge_ticks -= 1
+            active_mode = "EDGE (right turn to find wall)"
 
         # 纠偏爬升限速
         total_correction = slew_toward(last_correction, total_correction, MAX_DELTA_CORR)
@@ -434,8 +444,8 @@ def follow_wall_diagnostic(target_distance_mm=300, wall_length_mm=2400, speed=DR
         right_speed = speed + total_correction
 
         # Limit speed
-        min_speed = 40
-        max_speed = speed * 1.6
+        min_speed = 30
+        max_speed = speed * 1.8
         left_speed = clamp(left_speed, min_speed, max_speed)
         right_speed = clamp(right_speed, min_speed, max_speed)
 
@@ -443,56 +453,42 @@ def follow_wall_diagnostic(target_distance_mm=300, wall_length_mm=2400, speed=DR
         left_motor.run(left_speed)
         right_motor.run(right_speed)
 
-        # ========== Detailed output ==========
-        print("="*50)
-        print("Iter:", iteration)
-        print("Distance:", int(current_distance), "mm",
-              "| Raw:", ultrasonic.distance(), "mm")
-        print("Error:", int(distance_error), "mm")
-        print("Δd:", int(delta_d), "mm",
-              "Δθ(step):", int(delta_theta_step), "deg",
-              "gyro_dev:", int(gyro_deviation), "deg")
-        print("PersistFar:", persist_pos, "TrueFar:", is_true_far, "OpenSpace:", is_open_space)
-        print("Corner:", corner_ticks, "Edge:", edge_ticks)
-        print("Correction:", int(total_correction))
-        print("Left Speed:", int(left_speed), "Right Speed:", int(right_speed))
-
-        # Expected turning direction
-        if distance_error < -20:
-            print(">>> TOO CLOSE - Should turn RIGHT (away)")
-            print(">>> Expected: Left FASTER, Right SLOWER")
-        elif distance_error > 20:
-            print(">>> TOO FAR - Should turn LEFT (toward)")
-            print(">>> Expected: Left SLOWER, Right FASTER")
-        else:
-            print(">>> GOOD DISTANCE")
-
-        # Actual turning direction
-        if left_speed > right_speed + 20:
-            print(">>> ACTUAL: Turning RIGHT")
-        elif right_speed > left_speed + 20:
-            print(">>> ACTUAL: Turning LEFT")
-        else:
-            print(">>> ACTUAL: Going STRAIGHT")
-
-        print("="*50)
+        # ========== 详细输出（每5次迭代输出一次以减少刷屏）==========
+        if iteration % 5 == 0 or corner_ticks > 0 or edge_ticks > 0:
+            print("="*50)
+            print("Iter:", iteration)
+            print("Distance:", int(current_distance), "mm | Raw:", ultrasonic.distance())
+            print("Error:", int(distance_error), "mm")
+            print("Δd:", int(delta_d), "mm | Δθ:", int(delta_theta_step), "deg")
+            print("PersistFar:", persist_pos, "| TrueFar:", is_true_far)
+            print("MODE:", active_mode)
+            if corner_ticks > 0:
+                print(">>> CORNER ACTIVE! Remaining:", corner_ticks)
+            if edge_ticks > 0:
+                print(">>> EDGE ACTIVE! Remaining:", edge_ticks)
+            print("Correction:", int(total_correction))
+            print("Left:", int(left_speed), "| Right:", int(right_speed))
+            print("Corner triggers:", total_corner_triggers, 
+                  "| Edge triggers:", total_edge_triggers)
+            print("="*50)
 
         # Display on screen
         ev3.screen.clear()
         ev3.screen.draw_text(5, 5,  "D:" + str(int(current_distance)))
-        ev3.screen.draw_text(5, 20, "Raw:" + str(ultrasonic.distance()))
-        ev3.screen.draw_text(5, 35, "Err:" + str(int(distance_error)))
-        ev3.screen.draw_text(5, 50, "Corr:" + str(int(total_correction)))
-        ev3.screen.draw_text(5, 65, "L/R:" + str(int(left_speed)) + "/" + str(int(right_speed)))
+        ev3.screen.draw_text(5, 20, "E:" + str(int(distance_error)))
+        ev3.screen.draw_text(5, 35, "C:" + str(int(total_correction)))
+        ev3.screen.draw_text(5, 50, "L:" + str(int(left_speed)))
+        ev3.screen.draw_text(5, 65, "R:" + str(int(right_speed)))
+        
         if corner_ticks > 0:
-            ev3.screen.draw_text(5, 80, "CORNER<<")
+            ev3.screen.draw_text(5, 80, "CORNER!" + str(corner_ticks))
         elif edge_ticks > 0:
-            ev3.screen.draw_text(5, 80, "OPEN SPACE>>")
+            ev3.screen.draw_text(5, 80, "EDGE!" + str(edge_ticks))
         else:
             if current_distance < TARGET_DISTANCE - 20:
-                ev3.screen.draw_text(5, 80, "TOO CLOSE >>")
+                ev3.screen.draw_text(5, 80, "TOO CLOSE")
             elif current_distance > TARGET_DISTANCE + 20:
-                ev3.screen.draw_text(5, 80, "<< TOO FAR")
+                ev3.screen.draw_text(5, 80, "TOO FAR")
             else:
                 ev3.screen.draw_text(5, 80, "GOOD")
 
@@ -509,7 +505,12 @@ def follow_wall_diagnostic(target_distance_mm=300, wall_length_mm=2400, speed=DR
         if distance_traveled >= wall_length_mm:
             left_motor.stop(Stop.BRAKE)
             right_motor.stop(Stop.BRAKE)
+            print("")
+            print("="*50)
             print("COMPLETE!")
+            print("Total corner triggers:", total_corner_triggers)
+            print("Total edge triggers:", total_edge_triggers)
+            print("="*50)
             break
 
         wait(10)
@@ -524,9 +525,16 @@ def main():
     try:
         ev3.speaker.beep()
         print("="*50)
-        print("CORRECTLY FIXED VERSION")
-        print("所有问题已修复！")
+        print("ENHANCED DEBUG VERSION")
+        print("增强版 - 更容易触发，效果更强")
         print("="*50)
+        print("")
+        print("特点:")
+        print("- 触发阈值降低50%")
+        print("- BIAS值增加67% (60→100)")
+        print("- 响应速度加倍 (20→40)")
+        print("- 触发时会发出beep声")
+        print("- 详细的触发统计")
         print("")
         print("Press CENTER to start...")
 
@@ -571,21 +579,18 @@ def main():
         print("Turn complete!")
         wait(500)
 
-        # ============== Objective 3: Fixed Wall Following ==============
+        # ============== Objective 3: Enhanced Wall Following ==============
         print("")
         print("="*50)
-        print("OBJECTIVE 3: Correctly Fixed Wall Following")
+        print("OBJECTIVE 3: Enhanced Wall Following")
         print("="*50)
-        print("修复内容：")
-        print("1. ✅ 移除了清零逻辑")
-        print("2. ✅ EDGE_BIAS = -60 (右转)")
-        print("3. ✅ CORNER_BIAS = +60 (左转)")
-        print("4. ✅ edge_ticks添加'and not is_true_far'")
-        print("5. ✅ 添加距离抑制逻辑")
+        print("听beep声来判断触发:")
+        print("- 高音(1000Hz) = 内拐角检测")
+        print("- 低音(500Hz) = 探空检测")
         print("="*50)
 
         wait(10)
-        follow_wall_diagnostic(
+        follow_wall_enhanced(
             target_distance_mm=300,
             wall_length_mm=2400,
             speed=DRIVE_SPEED
