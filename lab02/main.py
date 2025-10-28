@@ -280,7 +280,7 @@ def follow_wall_diagnostic(target_distance_mm=300, wall_length_mm=2400, speed=DR
     
     # Reverse correction option
     REVERSE_CORRECTION = False  # If direction is wrong, change to True
-    K_FAR = 10
+    K_FAR = 15
 
     ALPHA = 0.35
     
@@ -293,7 +293,7 @@ def follow_wall_diagnostic(target_distance_mm=300, wall_length_mm=2400, speed=DR
     print("MAX_CORRECTION: " + str(MAX_CORRECTION))
     print("GYRO_ASSIST: " + str(GYRO_ASSIST))
     print("REVERSE_CORRECTION: " + str(REVERSE_CORRECTION))
-    print("="*50)
+    print("="*50)   
     
     # Initialization
     left_motor.reset_angle(0)
@@ -326,7 +326,7 @@ def follow_wall_diagnostic(target_distance_mm=300, wall_length_mm=2400, speed=DR
         distance_correction = distance_error * CORRECTION_GAIN
         if distance_error > 15 and continue_far < K_FAR:
             continue_far += 1
-            distance_correction = -5
+            distance_correction = -7
         elif distance_error < 15:
             continue_far = 0
     
