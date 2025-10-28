@@ -342,9 +342,9 @@ def follow_wall_diagnostic(target_distance_mm=300, wall_length_mm=2400, speed=DR
         total_correction = distance_correction + gyro_correction
         
         if gyro_deviation>60:
-            total_correction=-50
+            total_correction=10
         elif gyro_deviation<-60:
-            total_correction=50
+            total_correction=-10
         
         # Reverse correction if enabled
         if REVERSE_CORRECTION:
