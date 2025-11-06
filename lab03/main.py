@@ -448,7 +448,6 @@ def drive_until_obstacle_detected(speed=DRIVE_SPEED):
     Returns:
         True if obstacle detected, False if timeout
     """
-    print("Driving forward until obstacle detected (touch sensors only)...")
     
     wait(10)
     left_motor.reset_angle(0)
