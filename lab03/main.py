@@ -402,7 +402,7 @@ def follow_wall_diagnostic(target_distance_mm=200, wall_length_mm=2400, speed=DR
     
     # Special parameter: number of iterations to suppress correction when far away
     # Helps prevent oscillation when robot suddenly moves far from wall
-    K_FAR = 15
+    K_FAR = 30
 
     # Smoothing factor for distance measurements (low-pass filter)
     # ALPHA=1.0 means no smoothing, ALPHA=0.0 means maximum smoothing
@@ -457,7 +457,7 @@ def follow_wall_diagnostic(target_distance_mm=200, wall_length_mm=2400, speed=DR
         # Temporarily reduce correction to avoid sudden jerky movements
         if distance_error > 15 and continue_far < K_FAR:
             continue_far += 1
-            distance_correction = -7  # Gentle correction toward wall
+            distance_correction = -10  # Gentle correction toward wall
         elif distance_error < 15:
             continue_far = 0  # Reset counter when back in normal range
     
@@ -620,7 +620,7 @@ def main():
         
         # Back away from wall to prepare for turning
         print("Backing up 30cm...")
-        drive_straight_pid(-300, speed=DRIVE_SPEED)  # Negative = backward
+        drive_straight_pid(-200, speed=DRIVE_SPEED)  # Negative = backward
         wait(500)
         
         # ============== Objective 2: Turn Right 90° ==============
