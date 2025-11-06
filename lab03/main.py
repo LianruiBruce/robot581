@@ -619,83 +619,84 @@ def handle_collision_recovery_intelligent():
     print("Recovery complete!")
     return True
 
-
+# 这个方法是根据机器人与墙的相对位置来判断应该采取哪种恢复策略, 也就是恢复策略的判断依据
 def check_pose_intelligent():
     """
-    Intelligent pose checking using multiple methods:
-    1. Check ultrasonic distance (handle infinite/out of range)
-    2. Check collision sensors
-    3. Move forward/backward to probe wall position
-    4. Analyze robot orientation
-    
-    Returns:
-        Tuple (needs_adjustment, adjustment_type, distance)
-        adjustment_type: 'too_close', 'too_far', 'corner_detected', 'collision', None
+    智能姿态检测，采用多种方法综合判断：
+    1. 检查超声波测距（处理无穷大/超出范围的情况）
+    2. 检查碰撞传感器（触碰开关）
+    3. 前进/后退小距离探测墙体位置
+    4. 分析机器人朝向与角度信息
+
+    返回值:
+        (是否需要调整, 调整类型, 距离值)
+        调整类型包括: 'too_close'(距离太近), 'too_far'(距离太远), 'corner_detected'(检测到转角), 'collision'(发生碰撞), None(不需要调整)
     """
-    update_odometry()
+    update_odometry()  # 中文：先更新里程计，确保机器人位置信息是最新的
     
-    # Check collision sensors first
+    # 中文：第一步，先检测碰撞传感器（左右两个按钮），优先级最高
     left_pressed = touch_left.pressed()
     right_pressed = touch_right.pressed()
     
     if left_pressed or right_pressed:
+        # 中文：只要有一个碰撞传感器被触发，说明发生碰撞，立即返回需要调整类型为“collision”
         return (True, 'collision', None)
     
-    # Read ultrasonic distance multiple times to filter noise
+    # 中文：第二步，读取多次超声波测距，取平均值，过滤噪音
     distances = []
-    for i in range(3):
+    for i in range(7):
         try:
             dist = ultrasonic.distance()
-            if dist > 0 and dist <= 8000:
-                distances.append(dist)
+            if dist > 0 and dist <= 2000:
+                distances.append(dist)   # 中文：只收集有效（大于0，小于8000mm）的数据
         except:
+            # 中文：如果测距异常（如传感器抖动），跳过本次
             pass
-        wait(10)
+        wait(10)  # 中文：每次采集间间隔10ms
     
     if len(distances) == 0:
-        # No valid readings - might be at corner or sensor issue
-        print("No valid distance readings - possible corner detected")
+        # 中文：连续多次都无法读取有效距离，极有可能在拐角或者传感器异常
         return (True, 'corner_detected', None)
     
-    avg_distance = sum(distances) / len(distances)
+    avg_distance = sum(distances) / len(distances)  # 中文：有效测距的均值
     
-    # Check for infinite/out of range (corner or wall end)
-    if avg_distance > 5000 or avg_distance < 0:
+    # 中文：第三步，检查距离超范围（比如无穷大或者小于0），属于拐角或墙体尽头
+    if avg_distance > 2000 or avg_distance < 0:
         print("Distance out of range (" + str(int(avg_distance)) + "mm) - corner detected")
         return (True, 'corner_detected', None)
     
-    # Normal distance check
-    if avg_distance < TARGET_WALL_DISTANCE_MM - 50:  # Too close (< 15cm)
+    # 中文：第四步，判断是否太近（距离小于目标距离-50mm）、太远（大于最大设定距离）
+    if avg_distance < TARGET_WALL_DISTANCE_MM - 50:  # 中文：距离目标墙小于15厘米，太近
         return (True, 'too_close', avg_distance)
-    elif avg_distance > MAX_WALL_DISTANCE_MM:  # Too far (> 30cm)
+    elif avg_distance > MAX_WALL_DISTANCE_MM:        # 中文：距离目标墙大于30厘米，太远
         return (True, 'too_far', avg_distance)
     
-    # Probe forward to check if wall is ahead (for corner detection)
-    # Small forward movement to check distance change
+    # 中文：第五步，主动前探——机器人向前探测30mm，再判断距离变化，用于辅助检测拐角
     print("Probing forward 30mm to check wall...")
-    initial_distance = avg_distance
-    initial_gyro = gyro.angle()
+    initial_distance = avg_distance    # 中文：记录初始距离，后面用于计算变化
+    initial_gyro = gyro.angle()        # 中文：记录初始角度，便于直行修正
     
-    # Move forward a small amount
+    # 中文：复位电机编码器，准备前行
     left_motor.reset_angle(0)
     right_motor.reset_angle(0)
     probe_distance = 30
-    target_rotation = (probe_distance / WHEEL_CIRCUMFERENCE_MM) * 360
+    target_rotation = (probe_distance / WHEEL_CIRCUMFERENCE_MM) * 360  # 中文：把前行距离转换成编码器角度
     
     while True:
-        # Check collision during probe
+        # 中文：前探过程中随时检测是否发生碰撞
         if touch_left.pressed() or touch_right.pressed():
             left_motor.stop(Stop.BRAKE)
             right_motor.stop(Stop.BRAKE)
-            print("Collision during probe!")
+            print("Collision during probe!")  # 中文：前探时如果撞上障碍，立刻停止、后退
             drive_straight_pid(-probe_distance, speed=DRIVE_SPEED * 0.6)
             return (True, 'collision', None)
         
         avg_rotation = (abs(left_motor.angle()) + abs(right_motor.angle())) / 2
         if avg_rotation >= target_rotation:
+            # 中文：已经前进到指定距离，跳出循环
             break
         
-        # Gyro correction
+        # 中文：用陀螺仪做直行校正，避免探测歪斜
         gyro_error = gyro.angle() - initial_gyro
         correction = 2.0 * gyro_error
         left_motor.run(DRIVE_SPEED * 0.6 - correction)
@@ -704,27 +705,29 @@ def check_pose_intelligent():
     
     left_motor.stop(Stop.BRAKE)
     right_motor.stop(Stop.BRAKE)
-    wait(100)
+    wait(100)  # 中文：短暂停止，等待惯性消失
     
-    # Check distance after probe
+    # 中文：第六步，前探后再次测距，分析距离变化幅度，如果变化剧烈说明前面是拐角
     try:
         probe_distance_reading = ultrasonic.distance()
         if probe_distance_reading > 0 and probe_distance_reading <= 8000:
             distance_change = abs(probe_distance_reading - initial_distance)
             
-            # If distance changed significantly, we might be at a corner
+            # 中文：如果距离突然变化超过100mm，判定为拐角。先退回原位，再报告“corner_detected”
             if distance_change > 100:
                 print("Significant distance change (" + str(int(distance_change)) + "mm) - possible corner")
-                # Back up to original position
+                # 中文：退回到原位
                 drive_straight_pid(-probe_distance, speed=DRIVE_SPEED * 0.6)
                 return (True, 'corner_detected', None)
     except:
+        # 中文：如果探测超声波异常，忽略
         pass
     
-    # Back up to original position
+    # 中文：最后一步，不论前探测出什么，都要退回原位置，保证机器人实际位置不变
     drive_straight_pid(-probe_distance, speed=DRIVE_SPEED * 0.6)
     wait(100)
     
+    # 中文：最终判断为无需调整，返回False和当前平均距离
     return (False, None, avg_distance)
 
 
