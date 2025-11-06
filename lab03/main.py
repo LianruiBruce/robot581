@@ -660,7 +660,7 @@ def main():
         wait(10)
         # Execute wall following for 2.4 meters at 30cm target distance
         follow_wall_diagnostic(
-            target_distance_mm=300,   # Stay 30cm from wall
+            target_distance_mm=200,   # Stay 30cm from wall
             wall_length_mm=2400,      # Follow for 2.4 meters
             speed=DRIVE_SPEED
         )
