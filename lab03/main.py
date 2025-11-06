@@ -48,6 +48,7 @@ HIT_POINT_TOLERANCE_MM = 100  # How close to be considered "back at hit point"
 OBSTACLE_DETECTION_DISTANCE_MM = 300  # Distance to detect obstacle (30 cm)
 
 # Starting Point (from lab requirements)
+# NOTE: The starting point is the hit point, which is 20 cm away from the obstacle's front wall.
 START_POINT_X_MM = 2000.0     # 2.0 m
 START_POINT_Y_MM = 500.0      # 0.5 m
 
@@ -83,7 +84,7 @@ ultrasonic = UltrasonicSensor(ULTRA_PORT)
 
 # Reset gyro sensor
 gyro.reset_angle(0)
-wait(100)
+wait(10)
 
 # Odometry state - track robot position
 robot_x = START_POINT_X_MM    # X position in mm
@@ -108,7 +109,7 @@ def normalize_angle(angle_deg):
         angle_deg -= 360
     return angle_deg
 
-
+# 更新机器人位置,这个是计算机器人位置的核心函数
 def update_odometry():
     """
     Update robot's position using wheel odometry (differential drive kinematics).
@@ -121,31 +122,38 @@ def update_odometry():
     right_angle = right_motor.angle()
     
     # Calculate change in encoder readings (in degrees)
+    # 这个是计算左右轮的差值
     left_delta = left_angle - last_left_angle
     right_delta = right_angle - last_right_angle
     
-    # Convert degrees to distance (mm)
+    # Convert degrees to distance (mm) 
     left_distance = (left_delta / 360.0) * WHEEL_CIRCUMFERENCE_MM
     right_distance = (right_delta / 360.0) * WHEEL_CIRCUMFERENCE_MM
     
     # Update stored encoder values
+    # 更新左右轮的角速度
     last_left_angle = left_angle
     last_right_angle = right_angle
     
     # Calculate forward movement (average of both wheels)
+    # 计算前进距离
     forward_distance = (left_distance + right_distance) / 2.0
     
     # Get current heading from gyro (more reliable than calculated rotation)
+    # 获取当前航向角
     robot_heading = gyro.angle()
+    # 将航向角转换为弧度
     heading_rad = math.radians(robot_heading)
     
     # Update position based on current heading
+    # 更新机器人位置,根据当前航向角和前进距离,更新机器人位置(不太准,在目前来看)
     robot_x += forward_distance * math.cos(heading_rad)
     robot_y += forward_distance * math.sin(heading_rad)
     
     return (robot_x, robot_y, robot_heading)
 
 
+# 计算机器人当前位置到目标位置的距离
 def distance_to_point(x, y):
     """Calculate Euclidean distance from current position to target point."""
     dx = robot_x - x
@@ -227,11 +235,10 @@ def drive_straight_pid(distance_mm, speed=DRIVE_SPEED):
     
     left_motor.stop(Stop.BRAKE)
     right_motor.stop(Stop.BRAKE)
-    wait(100)
+    wait(10)
     
     # Final odometry update
     update_odometry()
-    print("Drive complete.")
 
 
 def turn_in_place_pid(angle_degrees, speed=TURN_SPEED):
