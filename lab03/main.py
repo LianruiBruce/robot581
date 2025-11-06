@@ -99,6 +99,7 @@ right_motor.reset_angle(0)
 
 # ============================ HELPER FUNCTIONS =============================
 
+# 这个方法是将角度归一化到-180到180度之间, 也就是角度归一化的函数
 def normalize_angle(angle_deg):
     """
     Normalize angle to -180 to 180 degree range.
@@ -240,8 +241,55 @@ def drive_straight_pid(distance_mm, speed=DRIVE_SPEED):
     # Final odometry update
     update_odometry()
 
+# 这个方法是根据陀螺仪角度来控制机器人转向, 也就是转向的控制依据
+def turn_in_place_simple(angle_degrees, speed=TURN_SPEED):
+    """
+    Simple turn-in-place using gyro feedback. No advanced convergence checks.
+    Turns robot by the specified angle (positive=clockwise/right, negative=counterclockwise/left).
+    """
+    initial_gyro = gyro.angle()
+    target_gyro = initial_gyro + angle_degrees
 
-def turn_in_place_pid(angle_degrees, speed=TURN_SPEED):
+    # Normalize target so the robot takes the shortest path
+    def normalize_angle_simple(deg):
+        while deg > 180:
+            deg -= 360
+        while deg < -180:
+            deg += 360
+        return deg
+
+    Kp = 2.5
+    Ki = 0.02
+    Kd = 0.5
+
+    integral = 0
+    last_error = 0
+
+    while True:
+        current_gyro = gyro.angle()
+        error = normalize_angle_simple(target_gyro - current_gyro)
+        if abs(error) < 2:  # close enough (degrees)
+            break
+
+        # Simple PID
+        p = Kp * error
+        integral += error * 0.02  # dt=20ms ~=0.02s
+        integral = max(-10, min(10, integral))
+        i = Ki * integral
+        d = Kd * (error - last_error) / 0.02
+        last_error = error
+        turn = p + i + d
+        turn = max(-speed, min(speed, turn))
+
+        left_motor.run(turn)
+        right_motor.run(-turn)
+        wait(20)
+
+    left_motor.stop(Stop.BRAKE)
+    right_motor.stop(Stop.BRAKE)
+    wait(100)
+
+# def turn_in_place_pid(angle_degrees, speed=TURN_SPEED):
     """
     Turn in place by specified angle using gyro feedback.
     
@@ -259,22 +307,32 @@ def turn_in_place_pid(angle_degrees, speed=TURN_SPEED):
     # Calculate target angle FIRST (before normalization)
     target_gyro_raw = initial_gyro + angle_degrees
     
-    # CRITICAL: Calculate the shortest path error directly
-    # Instead of normalizing target, we normalize the error
-    # This is more reliable for preventing spinning
+    # 计算误差
     error_raw = target_gyro_raw - initial_gyro
     error_normalized = normalize_angle(error_raw)
-    
-    # Now calculate the actual target based on normalized error
+    # 计算目标角度
     target_gyro = initial_gyro + error_normalized
     
-    print("Turning: initial=" + str(int(initial_gyro)) + "°, requested=" + str(int(angle_degrees)) + 
-          "°, normalized_error=" + str(int(error_normalized)) + "°, target=" + str(int(target_gyro)) + "°")
     
-    # Initialize variables
+    # 这几行代码的含义如下：
+    # 1. integral = 0
+    #    初始化PID控制器中的积分项为0，用于累计误差从而消除稳态偏差。
+    # 2. last_error = 0
+    #    记录上一次循环中的误差值，为微分项计算提供依据。
+    # 3. last_time = 0
+    #    上一次PID更新的时间戳，可用于按实际时间步长积分（如果后续用到）。
+    # 4. stable_count = 0
+    #    用来统计机器人稳定在目标附近的次数，常用于判断是否保持在目标角度一段时间。
+    # 5. no_progress_count = 0
+    #    记录陀螺仪读数长时间没有变化的次数，用于检测机器人是否卡住或打滑。
+    # 6. last_gyro = initial_gyro
+    #    保存上一次读取的陀螺仪角度值，用于后续“无进展”判断。
+    # 7. consecutive_same_error = 0
+    #    统计连续误差几乎没有变化的次数，用于检测机器人是否在原地空转或误差未收敛。
+    # 8. last_error_value = None
+    #    保存上一次误差的具体数值，辅助判断误差变化趋势。
     integral = 0
     last_error = 0
-    stopwatch = StopWatch()
     last_time = 0
     stable_count = 0
     no_progress_count = 0
@@ -287,7 +345,7 @@ def turn_in_place_pid(angle_degrees, speed=TURN_SPEED):
     while True:
         current_gyro = gyro.angle()
         
-        # Calculate error - normalize to -180 to 180
+        # 这里计算的是误差
         error = target_gyro - current_gyro
         error = normalize_angle(error)
         
@@ -318,10 +376,7 @@ def turn_in_place_pid(angle_degrees, speed=TURN_SPEED):
             print("WARNING: Error not changing (spinning), forcing completion")
             break
         
-        # Safety timeout
-        if stopwatch.time() > 12000:  # 12 seconds
-            print("Coarse turn timeout! Error: " + str(int(error)) + "°")
-            break
+
         
         # Proportional control with aggressive gain for large errors
         if abs(error) > 45:
@@ -348,8 +403,7 @@ def turn_in_place_pid(angle_degrees, speed=TURN_SPEED):
     left_motor.stop(Stop.BRAKE)
     right_motor.stop(Stop.BRAKE)
     wait(150)
-    
-    stopwatch.reset()
+
     no_progress_count = 0
     consecutive_same_error = 0
     last_gyro = gyro.angle()
@@ -435,7 +489,6 @@ def turn_in_place_pid(angle_degrees, speed=TURN_SPEED):
     final_error = normalize_angle(target_gyro - robot_heading)
     print("Turn complete! Heading: " + str(int(robot_heading)) + "°, error: " + str(int(final_error)) + "°")
 
-
 def drive_until_obstacle_detected(speed=DRIVE_SPEED):
     """
     Drive forward until obstacle is detected via TOUCH SENSORS ONLY.
@@ -456,17 +509,8 @@ def drive_until_obstacle_detected(speed=DRIVE_SPEED):
     wait(10)
     
     GYRO_CORRECTION_KP = 2.5
-    timeout_ms = 30000  # 30 second timeout
-    stopwatch = StopWatch()
-    
-    while True:
-        # Check timeout
-        if stopwatch.time() > timeout_ms:
-            print("Timeout: Obstacle not detected!")
-            left_motor.stop(Stop.BRAKE)
-            right_motor.stop(Stop.BRAKE)
-            return False
-        
+
+    while True:  
         # Update odometry during movement
         update_odometry()
         
@@ -475,14 +519,14 @@ def drive_until_obstacle_detected(speed=DRIVE_SPEED):
         if touch_left.pressed() or touch_right.pressed():
             left_motor.stop(Stop.BRAKE)
             right_motor.stop(Stop.BRAKE)
-            print("Obstacle detected via touch sensor!")
             ev3.speaker.beep()
             update_odometry()
-            return True
+            return
         
         # Gyro correction to maintain straight path
         gyro_error = gyro.angle() - initial_gyro
         correction = GYRO_CORRECTION_KP * gyro_error
+        # 这里“correction = max(-20, min(20, correction))”的含义是限制矫正转向的最大幅度，和“后退20cm”无关
         correction = max(-30, min(30, correction))
         
         left_speed = speed - correction
@@ -493,7 +537,7 @@ def drive_until_obstacle_detected(speed=DRIVE_SPEED):
         
         wait(10)
 
-
+# 这个方法是根据机器人与墙的相对位置来判断应该采取哪种恢复策略, 也就是恢复策略的判断依据
 def handle_collision_recovery_intelligent():
     """
     Intelligent collision recovery based on robot's position relative to wall.
@@ -515,14 +559,11 @@ def handle_collision_recovery_intelligent():
     Returns:
         True if collision was handled, False otherwise
     """
-    print("="*50)
-    print("INTELLIGENT COLLISION RECOVERY")
-    print("="*50)
     
     # Stop immediately
     left_motor.stop(Stop.BRAKE)
     right_motor.stop(Stop.BRAKE)
-    wait(200)
+    wait(20)
     
     # Check which sensors are pressed
     left_pressed = touch_left.pressed()
@@ -533,11 +574,12 @@ def handle_collision_recovery_intelligent():
     if left_pressed and right_pressed:
         # Both sensors: Direct frontal collision (dead end or 90° corner)
         # Most likely a sharp corner - need aggressive right turn
-        print("Both sensors: Frontal collision (corner/dead end)")
-        print("  → Backing up 150mm, then turning RIGHT 60°...")
+        # 如果两个都触发，说明是直角，需要后退150mm，然后右转60度
         drive_straight_pid(-150, speed=DRIVE_SPEED * 0.7)
-        wait(200)
-        turn_in_place_pid(60, speed=TURN_SPEED)  # Right turn to follow wall
+        wait(20)
+       # turn_in_place_pid(60, speed=TURN_SPEED)  # Right turn to follow wall
+       # 这里使用的是简单的转向方法，而不是PID控制, 试用一下看效果
+        turn_in_place_simple(60, speed=TURN_SPEED)
         
     elif left_pressed and not right_pressed:
         # Left sensor only: Wall curves inward or robot too close to wall
@@ -546,7 +588,10 @@ def handle_collision_recovery_intelligent():
         print("  → Backing up 120mm, then turning RIGHT 35°...")
         drive_straight_pid(-120, speed=DRIVE_SPEED * 0.7)
         wait(200)
-        turn_in_place_pid(35, speed=TURN_SPEED)  # Right turn away from wall
+        # turn_in_place_pid(35, speed=TURN_SPEED)  # Right turn away from wall
+        # 这里使用的是简单的转向方法，而不是PID控制, 试用一下看效果
+        turn_in_place_simple(35, speed=TURN_SPEED)
+        
         
     elif right_pressed and not left_pressed:
         # Right sensor only: Wall curves outward (convex corner) or obstacle ahead
@@ -555,7 +600,9 @@ def handle_collision_recovery_intelligent():
         print("  → Backing up 100mm, then turning RIGHT 45° to follow...")
         drive_straight_pid(-100, speed=DRIVE_SPEED * 0.7)
         wait(200)
-        turn_in_place_pid(45, speed=TURN_SPEED)  # Right turn to follow wall around corner
+        # turn_in_place_pid(45, speed=TURN_SPEED)  # Right turn to follow wall around corner
+        # 这里使用的是简单的转向方法，而不是PID控制, 试用一下看效果
+        turn_in_place_simple(45, speed=TURN_SPEED)
         
     else:
         # No sensors pressed (shouldn't happen, but handle gracefully)
@@ -564,9 +611,11 @@ def handle_collision_recovery_intelligent():
         print("  → Backing up 100mm, then turning RIGHT 30°...")
         drive_straight_pid(-100, speed=DRIVE_SPEED * 0.7)
         wait(200)
-        turn_in_place_pid(30, speed=TURN_SPEED)  # Right turn (default)
+        # turn_in_place_pid(30, speed=TURN_SPEED)  # Right turn (default)
+        # 这里使用的是简单的转向方法，而不是PID控制, 试用一下看效果
+        turn_in_place_simple(30, speed=TURN_SPEED)
     
-    wait(200)
+    wait(10)
     print("Recovery complete!")
     return True
 
