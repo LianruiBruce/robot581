@@ -344,83 +344,29 @@ def drive_until_obstacle_detected(speed=DRIVE_SPEED):
 # 这个方法是根据机器人与墙的相对位置来判断应该采取哪种恢复策略, 也就是恢复策略的判断依据
 def handle_collision_recovery_intelligent():
     """
-    Intelligent collision recovery based on robot's position relative to wall.
-    
-    CRITICAL CONTEXT:
-    - Robot is ALWAYS on the RIGHT side of the wall (left sensor faces wall)
-    - Robot moves CLOCKWISE around the wall (right turns)
-    - Ultrasonic sensor is on LEFT side, measuring distance to wall
-    
-    Collision Logic:
-    - Left sensor only: Wall curves inward (concave corner) or too close to wall
-                       → Back up, turn RIGHT to move away from wall
-    - Right sensor only: Wall curves outward (convex corner) or obstacle ahead
-                        → Back up, turn RIGHT to follow wall around corner
-    - Both sensors: Direct frontal collision (dead end or sharp corner)
-                   → Back up, turn RIGHT to continue following wall
-    - Default: Always turn RIGHT (most common case)
-    
+    简化的沿墙碰撞处理：后退，然后向右旋转90度。
+
+    用于沿墙过程中任何触碰传感器触发的情形，统一采取相同行为，
+    以确保稳定继续逆时针贴左墙绕行。
+
     Returns:
-        True if collision was handled, False otherwise
+        True after performing the recovery motion.
     """
-    
-    # Stop immediately
+    # 停车
     left_motor.stop(Stop.BRAKE)
     right_motor.stop(Stop.BRAKE)
-    wait(20)
-    
-    # Check which sensors are pressed
-    left_pressed = touch_left.pressed()
-    right_pressed = touch_right.pressed()
-    
-    # Determine collision type and adjust accordingly
-    # REMEMBER: Robot is on RIGHT side of wall, moving clockwise
-    if left_pressed and right_pressed:
-        # Both sensors: Direct frontal collision (dead end or 90° corner)
-        # Most likely a sharp corner - need aggressive right turn
-        # 如果两个都触发，说明是直角，需要后退150mm，然后右转60度
-        drive_straight_pid(-150, speed=DRIVE_SPEED * 0.7)
-        wait(20)
-       # turn_in_place_pid(60, speed=TURN_SPEED)  # Right turn to follow wall
-       # 这里使用的是简单的转向方法，而不是PID控制, 试用一下看效果
-        turn_in_place_simple(60, speed=TURN_SPEED)
-        
-    elif left_pressed and not right_pressed:
-        # Left sensor only: Wall curves inward or robot too close to wall
-        # Wall is on the LEFT, so we need to turn RIGHT to move away
-        print("Left sensor: Wall curves inward or too close")
-        print("  → Backing up 120mm, then turning RIGHT 35°...")
-        drive_straight_pid(-120, speed=DRIVE_SPEED * 0.7)
-        wait(200)
-        # turn_in_place_pid(35, speed=TURN_SPEED)  # Right turn away from wall
-        # 这里使用的是简单的转向方法，而不是PID控制, 试用一下看效果
-        turn_in_place_simple(35, speed=TURN_SPEED)
-        
-        
-    elif right_pressed and not left_pressed:
-        # Right sensor only: Wall curves outward (convex corner) or obstacle ahead
-        # This means wall ahead turns right, need to follow it
-        print("Right sensor: Wall curves outward (convex corner)")
-        print("  → Backing up 100mm, then turning RIGHT 45° to follow...")
-        drive_straight_pid(-100, speed=DRIVE_SPEED * 0.7)
-        wait(200)
-        # turn_in_place_pid(45, speed=TURN_SPEED)  # Right turn to follow wall around corner
-        # 这里使用的是简单的转向方法，而不是PID控制, 试用一下看效果
-        turn_in_place_simple(45, speed=TURN_SPEED)
-        
-    else:
-        # No sensors pressed (shouldn't happen, but handle gracefully)
-        # Default: Turn RIGHT (most common recovery direction)
-        print("No sensors detected, default recovery...")
-        print("  → Backing up 100mm, then turning RIGHT 30°...")
-        drive_straight_pid(-100, speed=DRIVE_SPEED * 0.7)
-        wait(200)
-        # turn_in_place_pid(30, speed=TURN_SPEED)  # Right turn (default)
-        # 这里使用的是简单的转向方法，而不是PID控制, 试用一下看效果
-        turn_in_place_simple(30, speed=TURN_SPEED)
-    
-    wait(10)
-    print("Recovery complete!")
+    wait(50)
+
+    # 统一后退距离（可按需要微调）
+    BACKUP_MM = 150
+    drive_straight_pid(-BACKUP_MM, speed=DRIVE_SPEED * 0.7)
+    wait(150)
+
+    # 向右旋转90度（顺时针）
+    turn_in_place_simple(90, speed=TURN_SPEED)
+    wait(120)
+
+    print("Collision recovery: backed up and turned RIGHT 90°")
     return True
 
 # 这个方法是根据机器人与墙的相对位置来判断应该采取哪种恢复策略, 也就是恢复策略的判断依据
