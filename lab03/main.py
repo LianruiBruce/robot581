@@ -46,6 +46,7 @@ TARGET_WALL_DISTANCE_MM = 200 # Target distance from wall during following (20 c
 MAX_WALL_DISTANCE_MM = 280    # Maximum allowed distance (28 cm requirement)
 HIT_POINT_TOLERANCE_MM = 100  # How close to be considered "back at hit point"
 OBSTACLE_DETECTION_DISTANCE_MM = 300  # Distance to detect obstacle (30 cm)
+CORNER_DISTANCE_TOLERANCE_MM = 80     # 将最后一次正常距离视为拐角的容差
 
 # Starting Point (from lab requirements)
 # NOTE: The starting point is the hit point, which is 20 cm away from the obstacle's front wall.
@@ -92,6 +93,7 @@ robot_y = START_POINT_Y_MM    # Y position in mm
 robot_heading = 0.0           # Heading in degrees (0 = positive X direction)
 last_left_angle = 0            # Last left motor encoder reading
 last_right_angle = 0           # Last right motor encoder reading
+last_valid_wall_distance = TARGET_WALL_DISTANCE_MM  # 记录最近一次可靠的墙距读数
 
 # Reset motor encoders
 left_motor.reset_angle(0)
@@ -215,15 +217,10 @@ def drive_straight_pid(distance_mm, speed=DRIVE_SPEED):
         correction = max(-50, min(50, correction))
         
         # Apply correction
-        if direction > 0:
-            left_speed = speed - correction
-            right_speed = speed + correction
-        else:
-            left_speed = speed + correction
-            right_speed = speed - correction
-        
-        left_speed = left_speed * direction
-        right_speed = right_speed * direction
+        base_left_speed = speed - correction
+        base_right_speed = speed + correction
+        left_speed = base_left_speed * direction
+        right_speed = base_right_speed * direction
         
         max_abs_speed = speed * 1.2
         left_speed = max(-max_abs_speed, min(max_abs_speed, left_speed))
@@ -382,6 +379,7 @@ def check_pose_intelligent():
         (是否需要调整, 调整类型, 距离值)
         调整类型包括: 'too_close'(距离太近), 'too_far'(距离太远), 'corner_detected'(检测到转角), 'collision'(发生碰撞), None(不需要调整)
     """
+    global last_valid_wall_distance
     update_odometry()  # 中文：先更新里程计，确保机器人位置信息是最新的
     
     # 中文：第一步，先检测碰撞传感器（左右两个按钮），优先级最高
@@ -406,14 +404,15 @@ def check_pose_intelligent():
     
     if len(distances) == 0:
         # 中文：连续多次都无法读取有效距离，极有可能在拐角或者传感器异常
-        return (True, 'corner_detected', None)
+        return (True, 'corner_detected', last_valid_wall_distance)
     
     avg_distance = sum(distances) / len(distances)  # 中文：有效测距的均值
+    last_valid_wall_distance = avg_distance
     
     # 中文：第三步，检查距离超范围（比如无穷大或者小于0），属于拐角或墙体尽头
     if avg_distance > 2000 or avg_distance < 0:
         print("Distance out of range (" + str(int(avg_distance)) + "mm) - corner detected")
-        return (True, 'corner_detected', None)
+        return (True, 'corner_detected', last_valid_wall_distance)
     
     # 中文：第四步，判断是否太近（距离小于目标距离-50mm）、太远（大于最大设定距离）
     if avg_distance < TARGET_WALL_DISTANCE_MM - 50:  # 中文：距离目标墙小于15厘米，太近
@@ -466,7 +465,8 @@ def check_pose_intelligent():
             if distance_change > 100:
                 # 中文：退回到原位
                 drive_straight_pid(-probe_distance, speed=DRIVE_SPEED * 0.6)
-                return (True, 'corner_detected', None)
+                last_valid_wall_distance = initial_distance
+                return (True, 'corner_detected', last_valid_wall_distance)
     except:
         # 中文：如果探测超声波异常，忽略
         pass
@@ -476,6 +476,7 @@ def check_pose_intelligent():
     wait(100)
     
     # 中文：最终判断为无需调整，返回False和当前平均距离
+    last_valid_wall_distance = avg_distance
     return (False, None, avg_distance)
 
 # 这个方法是根据机器人与墙的相对位置来判断应该采取哪种恢复策略, 也就是恢复策略的判断依据
@@ -486,6 +487,7 @@ def check_pose_and_adjust():
         (needs_adjust, reason, distance_mm)
         reason ∈ {'collision', 'too_close', None}
     """
+    global last_valid_wall_distance
     update_odometry()
     
     left_pressed = touch_left.pressed()
@@ -501,6 +503,7 @@ def check_pose_and_adjust():
     except:
         return (False, None, None)
     
+    last_valid_wall_distance = distance
     if distance < TARGET_WALL_DISTANCE_MM - 50:
         return (True, 'too_close', distance)
     
@@ -539,10 +542,13 @@ def apply_wall_adjustment(adjustment_type, measured_distance=None):
         wait(200)
         return True
     
+    global last_valid_wall_distance
     if adjustment_type == 'corner_detected':
         print("Adjusting: corner detected, handling turn...")
         left_pressed = touch_left.pressed()
         right_pressed = touch_right.pressed()
+        effective_distance = measured_distance if measured_distance is not None else last_valid_wall_distance
+        last_valid_wall_distance = effective_distance
         if left_pressed or right_pressed:
             drive_straight_pid(-100, speed=DRIVE_SPEED * 0.7)
             wait(200)
@@ -550,6 +556,15 @@ def apply_wall_adjustment(adjustment_type, measured_distance=None):
             wait(200)
             drive_straight_pid(80, speed=DRIVE_SPEED * 0.6)
         else:
+            if abs(effective_distance - TARGET_WALL_DISTANCE_MM) <= CORNER_DISTANCE_TOLERANCE_MM:
+                print("Corner bypass using steady distance " + str(int(effective_distance)) + "mm")
+                drive_straight_pid(80, speed=DRIVE_SPEED * 0.7)
+                wait(200)
+                turn_in_place_simple(-85, speed=TURN_SPEED * 0.8)
+                wait(200)
+                drive_straight_pid(60, speed=DRIVE_SPEED * 0.6)
+                wait(200)
+                return True
             drive_straight_pid(120, speed=DRIVE_SPEED * 0.7)
             wait(200)
             for i in range(3):
@@ -615,6 +630,7 @@ def follow_wall_until_hit_point(hit_point_x, hit_point_y, target_distance_mm=TAR
     沿墙前进直到回到hit point，用走一步检查一步的“死算”方式，防止累积误差
     """
 
+    global last_valid_wall_distance
     # 初始化PID相关变量（所有增益都较弱，防止过度反应）
     integral = 0
     last_error = 0
@@ -645,6 +661,7 @@ def follow_wall_until_hit_point(hit_point_x, hit_point_y, target_distance_mm=TAR
                 current_distance = last_distance
             else:
                 current_distance = ALPHA * raw_distance + (1 - ALPHA) * last_distance
+                last_valid_wall_distance = current_distance
         except:
             # 读取异常也用上次的
             current_distance = last_distance
