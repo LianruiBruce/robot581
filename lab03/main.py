@@ -178,6 +178,9 @@ def drive_straight_pid(distance_mm, speed=DRIVE_SPEED):
     left_motor.reset_angle(0)
     right_motor.reset_angle(0)
     initial_gyro = gyro.angle()
+    correction = 0
+    left_speed = 0
+    right_speed =0
     
     gyro_integral = 0
     gyro_last_error = 0
@@ -185,8 +188,12 @@ def drive_straight_pid(distance_mm, speed=DRIVE_SPEED):
     last_time = 0
         
     while True:
+        # 屏幕刷新较慢会影响实时性。如果想避免卡住但又能显示内容，可以每隔一段时间（比如200ms）才刷新屏幕：
         ev3.screen.clear()
-        ev3.screen.draw_text(0, 40, "Gyro: " + str(gyro.angle()))
+        ev3.screen.draw_text(5, 5, "Gyro: " + str(gyro.angle()))
+        ev3.screen.draw_text(5, 45, "Gyro Correction: " + str(correction))
+        ev3.screen.draw_text(5, 75, "Left Speed: " + str(left_speed))
+        ev3.screen.draw_text(5, 120, "Right Speed: " + str(right_speed))
         current_time = stopwatch.time()
         dt = (current_time - last_time) / 1000.0
         if dt == 0:
@@ -214,7 +221,7 @@ def drive_straight_pid(distance_mm, speed=DRIVE_SPEED):
         gyro_last_error = gyro_error
         
         # correction = gyro_p + gyro_i + gyro_d
-        correction = gyro_p 
+        correction = gyro_p + gyro_i + gyro_d
 
         correction = max(-50, min(50, correction))
         
@@ -223,8 +230,8 @@ def drive_straight_pid(distance_mm, speed=DRIVE_SPEED):
             left_speed = speed - correction
             right_speed = speed + correction
         else:
-            left_speed = -speed - correction
-            right_speed = -speed + correction
+            left_speed = -(speed + correction)
+            right_speed = -(speed - correction)
         
         # max_abs_speed = speed * 1.2
         # left_speed = max(-max_abs_speed, min(max_abs_speed, left_speed))
@@ -311,16 +318,19 @@ def drive_until_obstacle_detected(speed=DRIVE_SPEED):
     wait(10)
     left_motor.reset_angle(0)
     right_motor.reset_angle(0)
+    gyro.reset_angle(0)
     initial_gyro = gyro.angle()
+    gyro_error = 0
+    left_speed = 0
+    right_speed = 0
     wait(10)
     
     GYRO_CORRECTION_KP = 1.5
-
+    
     while True:  
         # Update odometry during movement
-        ev3.screen.clear()
-        ev3.screen.draw_text(0, 40, "Gyro: " + str(gyro.angle()))
         update_odometry()
+    
         
         # CRITICAL: ONLY check touch sensors - ultrasonic is on left side, not front!
         # Touch sensors are the reliable way to detect collision with front wall
@@ -337,6 +347,12 @@ def drive_until_obstacle_detected(speed=DRIVE_SPEED):
         # 这里“correction = max(-20, min(20, correction))”的含义是限制矫正转向的最大幅度，和“后退20cm”无关
         correction = max(-30, min(30, correction))
         
+        print("gyro_error: ", gyro_error, "correction: ", correction)
+        ev3.screen.clear()
+        ev3.screen.draw_text(5, 5, "gyro_error: " + str(gyro_error))
+        ev3.screen.draw_text(5, 25, "correction: " + str(correction))
+        ev3.screen.draw_text(5, 45, "left_speed: " + str(left_speed))
+        ev3.screen.draw_text(5, 65, "right_speed: " + str(right_speed))
         left_speed = speed - correction
         right_speed = speed + correction
         
@@ -950,9 +966,6 @@ def main():
         
     except Exception as e:
         # ========== Error Handling ==========
-        import traceback
-        traceback.print_exc()
-        
         # Emergency stop
         left_motor.stop(Stop.BRAKE)
         right_motor.stop(Stop.BRAKE)
