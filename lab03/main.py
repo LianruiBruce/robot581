@@ -1,967 +1,757 @@
 #!/usr/bin/env pybricks-micropython
-# Team Members: Lianrui Geng && Xinyi Guo
-# Lab 03  BOUNDARY TRACING AND RETURN TO START
-#
-# This program implements Lab 3: Boundary Tracing and Return to Start.
+# Gyroscope Test Program
+# 陀螺仪完整测试程序
 # 
-# Task Sequence:
-# 1. Start at starting point (2.0 m, 0.5 m)
-# 2. Drive straight forward until obstacle is detected (within 30cm or contact)
-# 3. Beep to indicate obstacle found
-# 4. Record hit point (position and heading) - 20cm from obstacle front wall
-# 5. Back away from obstacle
-# 6. Turn right 90 degrees using gyro
-# 7. Left-side wall following with PID control, keeping measuring point within 30 cm
-# 8. Continue tracing until back near hit point
-# 9. Turn away from obstacle and return to starting point using odometry
+# 功能：
+# 1. 全面测试陀螺仪功能
+# 2. 如果发现问题立即报警
+# 3. 提供实时监控模式
 
-import math
 from pybricks.hubs import EV3Brick
-from pybricks.ev3devices import Motor, UltrasonicSensor, TouchSensor, GyroSensor
-from pybricks.parameters import Port, Stop, Button
-from pybricks.tools import wait, StopWatch
+from pybricks.ev3devices import Motor, GyroSensor
+from pybricks.parameters import Port, Button, Stop
+from pybricks.tools import wait
+import math
 
 # ============================ CONFIGURATION =============================
 
-# Hardware Ports
-LEFT_MOTOR_PORT = Port.B
-RIGHT_MOTOR_PORT = Port.C
-TOUCH_LEFT_PORT = Port.S1     # Left bumper touch sensor
-TOUCH_RIGHT_PORT = Port.S3   # Right bumper touch sensor
-GYRO_PORT = Port.S2           # Gyroscope for angle measurement
-ULTRA_PORT = Port.S4         # Ultrasonic sensor facing LEFT side
+# 硬件端口配置
+GYRO_PORT = Port.S2           # 陀螺仪端口
+LEFT_MOTOR_PORT = Port.B      # 左电机（用于旋转测试）
+RIGHT_MOTOR_PORT = Port.C     # 右电机
 
-# Robot Geometry
-WHEEL_DIAMETER_MM = 56.0      # Diameter of drive wheels in millimeters
-AXLE_TRACK_MM = 125.0         # Distance between left and right wheels
-WHEEL_CIRCUMFERENCE_MM = math.pi * WHEEL_DIAMETER_MM
+# 机器人几何参数
+WHEEL_DIAMETER_MM = 56.0      # 轮子直径（毫米）
+AXLE_TRACK_MM = 125.0         # 轮距（两轮之间的距离，毫米）
 
-# Movement Parameters
-DRIVE_SPEED = 180             # Motor speed in degrees per second for forward motion
-TURN_SPEED = 80               # Motor speed in degrees per second for turning
-
-# Lab 3 Specific Parameters
-BACKUP_DISTANCE_MM = 200      # Distance to back away from obstacle (20 cm)
-TARGET_WALL_DISTANCE_MM = 200 # Target distance from wall during following (20 cm)
-MAX_WALL_DISTANCE_MM = 280    # Maximum allowed distance (28 cm requirement)
-HIT_POINT_TOLERANCE_MM = 100  # How close to be considered "back at hit point"
-OBSTACLE_DETECTION_DISTANCE_MM = 300  # Distance to detect obstacle (30 cm)
-CORNER_DISTANCE_TOLERANCE_MM = 80     # 将最后一次正常距离视为拐角的容差
-
-# Starting Point (from lab requirements)
-# NOTE: The starting point is the hit point, which is 20 cm away from the obstacle's front wall.
-START_POINT_X_MM = 2000.0     # 2.0 m
-START_POINT_Y_MM = 500.0      # 0.5 m
-
-# Wall Following PID Parameters (reduced to prevent overreaction)
-WALL_KP = 0.8                 # Reduced proportional gain to prevent overreaction
-WALL_KI = 0.005               # Reduced integral gain
-WALL_KD = 0.8                 # Reduced derivative gain
-
-# Dead Reckoning Parameters
-STEP_DISTANCE_MM = 80         # Distance to move in each step (dead reckoning)
-STEP_CHECK_INTERVAL = 10      # Check sensors every N steps
-
-# Straight Drive PID Parameters
-GYRO_KP = 2.0                 # Gyro correction PID gains
-GYRO_KI = 0
-GYRO_KD = 1
-
-# Turn Control Parameters
-COARSE_KP = 2.5               # Coarse turn proportional gain
-FINE_KP = 5.0                 # Fine turn PID gains
-FINE_KI = 0.08
-FINE_KD = 3.0
+# 测试参数
+TURN_SPEED = 100              # 旋转测试速度（度/秒）
+MAX_DRIFT_DEGREES = 3         # 最大允许漂移（度）
+MAX_ROTATION_ERROR = 10       # 旋转测试最大误差（度）
+MAX_RESET_ERROR = 2           # 重置后最大误差（度）
 
 # ============================ INITIALIZATION =============================
 
 ev3 = EV3Brick()
+gyro = GyroSensor(GYRO_PORT)
 left_motor = Motor(LEFT_MOTOR_PORT)
 right_motor = Motor(RIGHT_MOTOR_PORT)
-touch_left = TouchSensor(TOUCH_LEFT_PORT)
-touch_right = TouchSensor(TOUCH_RIGHT_PORT)
-gyro = GyroSensor(GYRO_PORT)
-ultrasonic = UltrasonicSensor(ULTRA_PORT)
 
-# Reset gyro sensor
+# 重置陀螺仪
 gyro.reset_angle(0)
 wait(10)
 
-# Odometry state - track robot position
-robot_x = START_POINT_X_MM    # X position in mm
-robot_y = START_POINT_Y_MM    # Y position in mm
-robot_heading = 0.0           # Heading in degrees (0 = positive X direction)
-last_left_angle = 0            # Last left motor encoder reading
-last_right_angle = 0           # Last right motor encoder reading
-last_valid_wall_distance = TARGET_WALL_DISTANCE_MM  # 记录最近一次可靠的墙距读数
+# ============================ ALARM FUNCTIONS =============================
 
-# Reset motor encoders
-left_motor.reset_angle(0)
-right_motor.reset_angle(0)
-
-# ============================ HELPER FUNCTIONS =============================
-
-# 这个方法是将角度归一化到-180到180度之间, 也就是角度归一化的函数
-def normalize_angle(angle_deg):
+def sound_alarm_critical():
     """
-    Normalize angle to -180 to 180 degree range.
-    This ensures we always take the shortest path when turning.
+    发出严重错误警报 - 快速高音哔哔声
     """
-    angle_deg = angle_deg % 360  # First normalize to 0-360
-    if angle_deg > 180:
-        angle_deg -= 360
-    return angle_deg
+    for i in range(10):
+        ev3.speaker.beep(frequency=1200, duration=100)
+        wait(100)
 
-# 更新机器人位置,这个是计算机器人位置的核心函数
-def update_odometry():
+def sound_alarm_warning():
     """
-    Update robot's position using wheel odometry (differential drive kinematics).
-    Should be called regularly during movement to maintain accurate position tracking.
+    发出警告警报 - 中速中音哔哔声
     """
-    global robot_x, robot_y, robot_heading, last_left_angle, last_right_angle
-    
-    # Get current encoder readings
-    left_angle = left_motor.angle()
-    right_angle = right_motor.angle()
-    
-    # Calculate change in encoder readings (in degrees)
-    # 这个是计算左右轮的差值
-    left_delta = left_angle - last_left_angle
-    right_delta = right_angle - last_right_angle
-    
-    # Convert degrees to distance (mm) 
-    left_distance = (left_delta / 360.0) * WHEEL_CIRCUMFERENCE_MM
-    right_distance = (right_delta / 360.0) * WHEEL_CIRCUMFERENCE_MM
-    
-    # Update stored encoder values
-    # 更新左右轮的角速度
-    last_left_angle = left_angle
-    last_right_angle = right_angle
-    
-    # Calculate forward movement (average of both wheels)
-    # 计算前进距离
-    forward_distance = (left_distance + right_distance) / 2.0
-    
-    # Get current heading from gyro (more reliable than calculated rotation)
-    # 获取当前航向角
-    robot_heading = gyro.angle()
-    # 将航向角转换为弧度
-    heading_rad = math.radians(robot_heading)
-    
-    # Update position based on current heading
-    # 更新机器人位置,根据当前航向角和前进距离,更新机器人位置(不太准,在目前来看)
-    robot_x += forward_distance * math.cos(heading_rad)
-    robot_y += forward_distance * math.sin(heading_rad)
-    
-    return (robot_x, robot_y, robot_heading)
+    for i in range(5):
+        ev3.speaker.beep(frequency=800, duration=200)
+        wait(200)
 
-
-# 计算机器人当前位置到目标位置的距离
-def distance_to_point(x, y):
-    """Calculate Euclidean distance from current position to target point."""
-    dx = robot_x - x
-    dy = robot_y - y
-    return math.sqrt(dx*dx + dy*dy)
-
-
-def drive_straight_pid(distance_mm, speed=DRIVE_SPEED):
+def sound_alarm_minor():
     """
-    Drive straight for a specific distance using gyro PID control.
+    发出轻微警报 - 低音长哔声
+    """
+    for i in range(3):
+        ev3.speaker.beep(frequency=400, duration=500)
+        wait(300)
+
+def display_error(test_name, error_msg, alarm_level="critical"):
+    """
+    显示错误信息并发出警报
     
     Args:
-        distance_mm: Target distance (positive=forward, negative=backward)
-        speed: Base motor speed in degrees per second
+        test_name: 测试名称
+        error_msg: 错误信息
+        alarm_level: 警报级别 ("critical", "warning", "minor")
     """
-    target_rotation = (abs(distance_mm) / WHEEL_CIRCUMFERENCE_MM) * 360
-    direction = 1 if distance_mm > 0 else -1
+    ev3.screen.clear()
+    ev3.screen.draw_text(10, 10, "!!! GYRO ERROR !!!")
+    ev3.screen.draw_text(10, 30, "Test: " + test_name)
+    ev3.screen.draw_text(10, 50, error_msg[:18])  # 限制长度
+    if len(error_msg) > 18:
+        ev3.screen.draw_text(10, 70, error_msg[18:36])
+    ev3.screen.draw_text(10, 90, "Press any button")
     
+    # 根据级别发出不同警报
+    if alarm_level == "critical":
+        sound_alarm_critical()
+    elif alarm_level == "warning":
+        sound_alarm_warning()
+    else:
+        sound_alarm_minor()
+    
+    # 等待按钮按下
+    while True:
+        if len(ev3.buttons.pressed()) > 0:
+            break
+        wait(10)
+    
+    wait(500)  # 防止按钮连按
+
+# ============================ ROTATION HELPER =============================
+
+def turn_in_place_precise(angle_degrees, speed=TURN_SPEED):
+    """
+    精确的原地旋转函数，基于机器人轮距计算
+    
+    Args:
+        angle_degrees: 旋转角度（正数=顺时针，负数=逆时针）
+        speed: 电机速度（度/秒）
+    
+    Returns:
+        实际旋转的角度（从陀螺仪读取）
+    """
+    # 计算需要的弧长
+    # 机器人旋转时，每个轮子走的弧长 = (轮距 * π * 角度) / 360
+    wheel_circumference = math.pi * WHEEL_DIAMETER_MM
+    turn_circumference = math.pi * AXLE_TRACK_MM
+    arc_length = (abs(angle_degrees) / 360.0) * turn_circumference
+    
+    # 转换为电机需要转的角度
+    motor_rotation_degrees = (arc_length / wheel_circumference) * 360
+    
+    # 记录初始陀螺仪角度
+    initial_gyro = gyro.angle()
+    
+    # 重置电机编码器
     left_motor.reset_angle(0)
     right_motor.reset_angle(0)
-    initial_gyro = gyro.angle()
     
-    gyro_integral = 0
-    gyro_last_error = 0
-    stopwatch = StopWatch()
-    last_time = 0
-        
+    ev3.screen.clear()
+    ev3.screen.draw_text(10, 10, "Turning...")
+    ev3.screen.draw_text(10, 30, "Target: " + str(int(angle_degrees)) + " deg")
+    ev3.screen.draw_text(10, 50, "Motor: " + str(int(motor_rotation_degrees)) + " deg")
+    
+    # 根据方向设置电机速度
+    if angle_degrees > 0:  # 顺时针（右转）
+        left_motor.run(speed)
+        right_motor.run(-speed)
+    else:  # 逆时针（左转）
+        left_motor.run(-speed)
+        right_motor.run(speed)
+    
+    # 等待电机转到目标角度
     while True:
+        avg_motor_angle = (abs(left_motor.angle()) + abs(right_motor.angle())) / 2
+        current_gyro = gyro.angle()
+        
+        # 实时显示进度
         ev3.screen.clear()
-        ev3.screen.draw_text(0, 40, "Gyro: " + str(gyro.angle()))
-        current_time = stopwatch.time()
-        dt = (current_time - last_time) / 1000.0
-        if dt == 0:
-            dt = 0.05
-        last_time = current_time
+        ev3.screen.draw_text(10, 10, "Turning...")
+        ev3.screen.draw_text(10, 30, "Motor: " + str(int(avg_motor_angle)))
+        ev3.screen.draw_text(10, 50, "Gyro: " + str(int(current_gyro - initial_gyro)))
         
-        # Update odometry during movement
-        update_odometry()
-        
-        # Check if target distance reached
-        avg_rotation = (abs(left_motor.angle()) + abs(right_motor.angle())) / 2
-        if avg_rotation >= target_rotation:
+        if avg_motor_angle >= motor_rotation_degrees:
             break
         
-        # Calculate gyro error
-        gyro_error = gyro.angle() - initial_gyro
-        
-        # PID calculation
-        gyro_p = GYRO_KP * gyro_error
-        gyro_integral += gyro_error * dt
-        gyro_integral = max(-30, min(30, gyro_integral))
-        gyro_i = GYRO_KI * gyro_integral
-        gyro_derivative = (gyro_error - gyro_last_error) / dt
-        gyro_d = GYRO_KD * gyro_derivative
-        gyro_last_error = gyro_error
-        
-        # correction = gyro_p + gyro_i + gyro_d
-        correction = gyro_p 
-
-        correction = max(-50, min(50, correction))
-        
-        # Apply correction
-        if direction == 1:
-            left_speed = speed - correction
-            right_speed = speed + correction
-        else:
-            left_speed = -speed - correction
-            right_speed = -speed + correction
-        
-        # max_abs_speed = speed * 1.2
-        # left_speed = max(-max_abs_speed, min(max_abs_speed, left_speed))
-        # right_speed = max(-max_abs_speed, min(max_abs_speed, right_speed))
-        
-        left_motor.run(left_speed)
-        right_motor.run(right_speed)
-
-        wait(20)
-        
+        wait(10)
     
+    # 停止电机
     left_motor.stop(Stop.BRAKE)
     right_motor.stop(Stop.BRAKE)
-    wait(10)
+    wait(300)  # 等待稳定
     
-    # Final odometry update
-    update_odometry()
+    # 返回实际旋转的角度
+    final_gyro = gyro.angle()
+    actual_rotation = final_gyro - initial_gyro
+    
+    return actual_rotation
 
-# 这个方法是根据陀螺仪角度来控制机器人转向, 也就是转向的控制依据
-def turn_in_place_simple(angle_degrees, speed=TURN_SPEED):
+def turn_using_gyro_pid(target_angle, speed=TURN_SPEED):
     """
-    Simple turn-in-place using gyro feedback. No advanced convergence checks.
-    Turns robot by the specified angle (positive=clockwise/right, negative=counterclockwise/left).
+    使用陀螺仪PID控制的精确旋转
+    这个方法直接用陀螺仪反馈来控制，更准确
+    
+    Args:
+        target_angle: 目标旋转角度（正数=顺时针，负数=逆时针）
+        speed: 最大速度
+    
+    Returns:
+        实际旋转的角度
     """
     initial_gyro = gyro.angle()
-    target_gyro = initial_gyro + angle_degrees
-
-    # Normalize target so the robot takes the shortest path
-    def normalize_angle_simple(deg):
+    target_gyro = initial_gyro + target_angle
+    
+    # PID参数
+    Kp = 2.5
+    Ki = 0.02
+    Kd = 0.5
+    
+    integral = 0
+    last_error = 0
+    
+    ev3.screen.clear()
+    ev3.screen.draw_text(10, 10, "PID Turning...")
+    ev3.screen.draw_text(10, 30, "Target: " + str(int(target_angle)))
+    
+    # 归一化角度到-180到180
+    def normalize_angle(deg):
         while deg > 180:
             deg -= 360
         while deg < -180:
             deg += 360
         return deg
-
-    Kp = 2.5
-    Ki = 0.02
-    Kd = 0.5
-
-    integral = 0
-    last_error = 0
-
+    
     while True:
         current_gyro = gyro.angle()
-        error = normalize_angle_simple(target_gyro - current_gyro)
-        if abs(error) < 2:  # close enough (degrees)
+        error = normalize_angle(target_gyro - current_gyro)
+        
+        # 如果误差小于2度，认为到达
+        if abs(error) < 2:
             break
-
-        # Simple PID
+        
+        # PID计算
         p = Kp * error
-        integral += error * 0.02  # dt=20ms ~=0.02s
-        integral = max(-10, min(10, integral))
+        integral += error * 0.02  # dt=20ms
+        integral = max(-10, min(10, integral))  # 限制积分
         i = Ki * integral
         d = Kd * (error - last_error) / 0.02
         last_error = error
-        turn = p + i + d
-        turn = max(-speed, min(speed, turn))
-
-        left_motor.run(turn)
-        right_motor.run(-turn)
+        
+        turn_power = p + i + d
+        turn_power = max(-speed, min(speed, turn_power))
+        
+        # 应用到电机
+        left_motor.run(turn_power)
+        right_motor.run(-turn_power)
+        
+        # 显示进度
+        if abs(error) > 10:  # 只在误差较大时更新屏幕，节省时间
+            ev3.screen.clear()
+            ev3.screen.draw_text(10, 10, "PID Turning...")
+            ev3.screen.draw_text(10, 30, "Error: " + str(int(error)))
+            ev3.screen.draw_text(10, 50, "Current: " + str(int(current_gyro - initial_gyro)))
+        
         wait(20)
-
+    
+    # 停止
     left_motor.stop(Stop.BRAKE)
     right_motor.stop(Stop.BRAKE)
-    wait(100)
+    wait(300)
+    
+    final_gyro = gyro.angle()
+    actual_rotation = final_gyro - initial_gyro
+    
+    return actual_rotation
 
-## NOTE: An alternative PID-based turn_in_place implementation used for experimentation
-## was previously left here at module scope with the function header commented out.
-## It has been removed to prevent executing control code at import time.
+# ============================ TEST FUNCTIONS =============================
 
-def drive_until_obstacle_detected(speed=DRIVE_SPEED):
+def test_gyro_basic_read():
     """
-    Drive forward until obstacle is detected via TOUCH SENSORS ONLY.
-    
-    CRITICAL: Ultrasonic sensor is on the LEFT SIDE, so it cannot detect
-    obstacles in front during forward motion. We ONLY use touch sensors here.
-    
-    Beeps when obstacle is found.
+    测试1: 基本读数测试
+    检查是否能正常读取陀螺仪数据
     
     Returns:
-        True if obstacle detected, False if timeout
+        True if passed, False otherwise
     """
+    ev3.screen.clear()
+    ev3.screen.draw_text(10, 10, "Test 1: Basic Read")
+    ev3.screen.draw_text(10, 30, "Testing...")
     
-    wait(10)
-    left_motor.reset_angle(0)
-    right_motor.reset_angle(0)
-    initial_gyro = gyro.angle()
-    wait(10)
-    
-    GYRO_CORRECTION_KP = 1.5
-
-    while True:  
-        # Update odometry during movement
+    try:
+        initial_angle = gyro.angle()
+        ev3.screen.draw_text(10, 50, "Reading: " + str(initial_angle))
+        wait(1000)
+        
+        # 再读几次确保稳定
+        for i in range(5):
+            angle = gyro.angle()
+            wait(100)
+        
         ev3.screen.clear()
-        ev3.screen.draw_text(0, 40, "Gyro: " + str(gyro.angle()))
-        update_odometry()
+        ev3.screen.draw_text(10, 40, "Test 1: PASS")
+        ev3.speaker.beep(frequency=600, duration=200)
+        wait(1500)
+        return True
         
-        # CRITICAL: ONLY check touch sensors - ultrasonic is on left side, not front!
-        # Touch sensors are the reliable way to detect collision with front wall
-        if touch_left.pressed() or touch_right.pressed():
-            left_motor.stop(Stop.BRAKE)
-            right_motor.stop(Stop.BRAKE)
-            ev3.speaker.beep()
-            update_odometry()
-            return True
-        
-        # Gyro correction to maintain straight path
-        gyro_error = gyro.angle() - initial_gyro
-        correction = GYRO_CORRECTION_KP * gyro_error
-        # 这里“correction = max(-20, min(20, correction))”的含义是限制矫正转向的最大幅度，和“后退20cm”无关
-        correction = max(-30, min(30, correction))
-        
-        left_speed = speed - correction
-        right_speed = speed + correction
-        
-        left_motor.run(left_speed)
-        right_motor.run(right_speed)
-        
-        wait(10)
+    except Exception as e:
+        display_error("Basic Read", "Cannot read gyro", "critical")
+        return False
 
-# 这个方法是根据机器人与墙的相对位置来判断应该采取哪种恢复策略, 也就是恢复策略的判断依据
-def handle_collision_recovery_intelligent():
+def test_gyro_drift():
     """
-    简化的沿墙碰撞处理：后退，然后向右旋转90度。
-
-    用于沿墙过程中任何触碰传感器触发的情形，统一采取相同行为，
-    以确保稳定继续逆时针贴左墙绕行。
-
+    测试2: 漂移测试
+    机器人静止5秒，检查陀螺仪读数是否稳定
+    
     Returns:
-        True after performing the recovery motion.
+        True if passed, False otherwise
     """
-    # 停车
-    left_motor.stop(Stop.BRAKE)
-    right_motor.stop(Stop.BRAKE)
-    wait(50)
+    ev3.screen.clear()
+    ev3.screen.draw_text(10, 10, "Test 2: Drift Test")
+    ev3.screen.draw_text(10, 30, "Keep robot STILL!")
+    ev3.screen.draw_text(10, 50, "Testing in 3s...")
+    wait(3000)
+    
+    gyro.reset_angle(0)
+    wait(100)
+    
+    drift_readings = []
+    
+    # 5秒测试，每100ms读一次
+    for i in range(50):
+        angle = gyro.angle()
+        drift_readings.append(angle)
+        
+        # 每秒更新一次屏幕
+        if i % 10 == 0:
+            ev3.screen.clear()
+            ev3.screen.draw_text(10, 10, "Drift Test")
+            ev3.screen.draw_text(10, 30, "Time: " + str(i // 10) + "/5 s")
+            ev3.screen.draw_text(10, 50, "Angle: " + str(angle) + " deg")
+            ev3.screen.draw_text(10, 70, "Stay STILL!")
+        
+        wait(100)
+    
+    # 计算漂移量
+    max_drift = max(drift_readings)
+    min_drift = min(drift_readings)
+    total_drift = max_drift - min_drift
+    
+    ev3.screen.clear()
+    ev3.screen.draw_text(10, 10, "Drift Test Result:")
+    ev3.screen.draw_text(10, 30, "Max: " + str(int(max_drift)) + " deg")
+    ev3.screen.draw_text(10, 50, "Min: " + str(int(min_drift)) + " deg")
+    ev3.screen.draw_text(10, 70, "Total: " + str(int(total_drift)) + " deg")
+    
+    wait(2000)
+    
+    # 判断是否通过
+    if total_drift > MAX_DRIFT_DEGREES:
+        error_msg = "Drift: " + str(int(total_drift)) + ">" + str(MAX_DRIFT_DEGREES) + " deg"
+        display_error("Drift Test", error_msg, "warning")
+        return False
+    else:
+        ev3.screen.clear()
+        ev3.screen.draw_text(10, 40, "Test 2: PASS")
+        ev3.speaker.beep(frequency=600, duration=200)
+        wait(1500)
+        return True
 
-    # 统一后退距离（可按需要微调）
-    BACKUP_MM = 150
-    drive_straight_pid(-BACKUP_MM, speed=DRIVE_SPEED * 0.7)
-    wait(150)
-
-    # 向右旋转90度（顺时针）
-    turn_in_place_simple(90, speed=TURN_SPEED)
-    wait(120)
-
-    print("Collision recovery: backed up and turned RIGHT 90°")
-    return True
-
-# 这个方法是根据机器人与墙的相对位置来判断应该采取哪种恢复策略, 也就是恢复策略的判断依据
-def check_pose_intelligent():
+def test_gyro_rotation():
     """
-    智能姿态检测，采用多种方法综合判断：
-    1. 检查超声波测距（处理无穷大/超出范围的情况）
-    2. 检查碰撞传感器（触碰开关）
-    3. 前进/后退小距离探测墙体位置
-    4. 分析机器人朝向与角度信息
-
-    返回值:
-        (是否需要调整, 调整类型, 距离值)
-        调整类型包括: 'too_close'(距离太近), 'too_far'(距离太远), 'corner_detected'(检测到转角), 'collision'(发生碰撞), None(不需要调整)
+    测试3: 旋转响应测试
+    让机器人旋转90度，检查陀螺仪读数是否准确
+    提供两种方法供选择
+    
+    Returns:
+        True if passed, False otherwise
     """
-    global last_valid_wall_distance
-    update_odometry()  # 中文：先更新里程计，确保机器人位置信息是最新的
+    ev3.screen.clear()
+    ev3.screen.draw_text(10, 10, "Test 3: Rotation")
+    ev3.screen.draw_text(10, 30, "Choose method:")
+    ev3.screen.draw_text(10, 45, "UP: Calculated")
+    ev3.screen.draw_text(10, 60, "DOWN: Gyro PID")
+    ev3.screen.draw_text(10, 75, "CENTER: Both")
     
-    # 中文：第一步，先检测碰撞传感器（左右两个按钮），优先级最高
-    left_pressed = touch_left.pressed()
-    right_pressed = touch_right.pressed()
+    # 等待选择
+    method = None
+    while method is None:
+        buttons = ev3.buttons.pressed()
+        if Button.UP in buttons:
+            method = "calculated"
+            ev3.speaker.beep(frequency=600, duration=100)
+        elif Button.DOWN in buttons:
+            method = "pid"
+            ev3.speaker.beep(frequency=600, duration=100)
+        elif Button.CENTER in buttons:
+            method = "both"
+            ev3.speaker.beep(frequency=600, duration=100)
+        wait(10)
     
-    if left_pressed or right_pressed:
-        # 中文：只要有一个碰撞传感器被触发，说明发生碰撞，立即返回需要调整类型为“collision”
-        return (True, 'collision', None)
+    wait(500)
     
-    # 中文：第二步，读取多次超声波测距，取平均值，过滤噪音
-    distances = []
-    for i in range(7):
-        try:
-            dist = ultrasonic.distance()
-            if dist > 0 and dist <= 2000:
-                distances.append(dist)   # 中文：只收集有效（大于0，小于2000mm）的数据
-        except:
-            # 中文：如果测距异常（如传感器抖动），跳过本次
-            pass
-        wait(10)  # 中文：每次采集间间隔10ms
+    results = []
     
-    if len(distances) == 0:
-        # 中文：连续多次都无法读取有效距离，极有可能在拐角或者传感器异常
-        return (True, 'corner_detected', last_valid_wall_distance)
+    # 方法1: 基于计算的旋转
+    if method in ["calculated", "both"]:
+        ev3.screen.clear()
+        ev3.screen.draw_text(10, 10, "Method 1:")
+        ev3.screen.draw_text(10, 30, "Calculated Turn")
+        wait(1500)
+        
+        gyro.reset_angle(0)
+        wait(100)
+        
+        actual_angle = turn_in_place_precise(90, speed=TURN_SPEED)
+        error = abs(actual_angle - 90)
+        
+        ev3.screen.clear()
+        ev3.screen.draw_text(10, 10, "Calculated Result:")
+        ev3.screen.draw_text(10, 30, "Expected: 90 deg")
+        ev3.screen.draw_text(10, 50, "Actual: " + str(int(actual_angle)))
+        ev3.screen.draw_text(10, 70, "Error: " + str(int(error)))
+        wait(3000)
+        
+        results.append(("Calculated", actual_angle, error))
     
-    avg_distance = sum(distances) / len(distances)  # 中文：有效测距的均值
-    last_valid_wall_distance = avg_distance
+    # 方法2: 基于陀螺仪PID的旋转
+    if method in ["pid", "both"]:
+        ev3.screen.clear()
+        ev3.screen.draw_text(10, 10, "Method 2:")
+        ev3.screen.draw_text(10, 30, "Gyro PID Turn")
+        wait(1500)
+        
+        gyro.reset_angle(0)
+        wait(100)
+        
+        actual_angle = turn_using_gyro_pid(90, speed=TURN_SPEED)
+        error = abs(actual_angle - 90)
+        
+        ev3.screen.clear()
+        ev3.screen.draw_text(10, 10, "PID Result:")
+        ev3.screen.draw_text(10, 30, "Expected: 90 deg")
+        ev3.screen.draw_text(10, 50, "Actual: " + str(int(actual_angle)))
+        ev3.screen.draw_text(10, 70, "Error: " + str(int(error)))
+        wait(3000)
+        
+        results.append(("PID", actual_angle, error))
     
-    # 中文：第三步，检查距离超范围（比如无穷大或者小于0），属于拐角或墙体尽头
-    if avg_distance > 2000 or avg_distance < 0:
-        print("Distance out of range (" + str(int(avg_distance)) + "mm) - corner detected")
-        return (True, 'corner_detected', last_valid_wall_distance)
+    # 显示综合结果
+    ev3.screen.clear()
+    ev3.screen.draw_text(10, 5, "Rotation Summary:")
+    y = 25
+    all_passed = True
     
-    # 中文：第四步，判断是否太近（距离小于目标距离-50mm）、太远（大于最大设定距离）
-    if avg_distance < TARGET_WALL_DISTANCE_MM - 50:  # 中文：距离目标墙小于15厘米，太近
-        return (True, 'too_close', avg_distance)
-    elif avg_distance > MAX_WALL_DISTANCE_MM:        # 中文：距离目标墙大于28厘米，太远
-        return (True, 'too_far', avg_distance)
+    for name, angle, error in results:
+        status = "PASS" if error <= MAX_ROTATION_ERROR else "FAIL"
+        ev3.screen.draw_text(10, y, name + ": " + str(int(error)) + "d " + status)
+        y += 20
+        if error > MAX_ROTATION_ERROR:
+            all_passed = False
     
-    # 中文：第五步，主动前探——机器人向前探测30mm，再判断距离变化，用于辅助检测拐角
-    initial_distance = avg_distance    # 中文：记录初始距离，后面用于计算变化
-    initial_gyro = gyro.angle()        # 中文：记录初始角度，便于直行修正
+    wait(3000)
     
-    # 中文：复位电机编码器，准备前行
-    left_motor.reset_angle(0)
-    right_motor.reset_angle(0)
-    probe_distance = 50
-    target_rotation = (probe_distance / WHEEL_CIRCUMFERENCE_MM) * 360  # 中文：把前行距离转换成编码器角度
+    # 判断是否通过
+    if not all_passed:
+        worst_error = max(r[2] for r in results)
+        error_msg = "Max error: " + str(int(worst_error)) + ">" + str(MAX_ROTATION_ERROR)
+        display_error("Rotation Test", error_msg, "warning")
+        return False
+    else:
+        ev3.screen.clear()
+        ev3.screen.draw_text(10, 40, "Test 3: PASS")
+        ev3.speaker.beep(frequency=600, duration=200)
+        wait(1500)
+        return True
+
+def test_gyro_reset():
+    """
+    测试4: 重置功能测试
+    检查reset_angle()是否正常工作
+    
+    Returns:
+        True if passed, False otherwise
+    """
+    ev3.screen.clear()
+    ev3.screen.draw_text(10, 10, "Test 4: Reset")
+    ev3.screen.draw_text(10, 30, "Testing...")
+    
+    # 先读一个非零的角度
+    current_angle = gyro.angle()
+    ev3.screen.draw_text(10, 50, "Before: " + str(int(current_angle)))
+    wait(1000)
+    
+    # 重置
+    gyro.reset_angle(0)
+    wait(200)
+    
+    # 检查重置后的值
+    reset_angle = gyro.angle()
+    
+    ev3.screen.clear()
+    ev3.screen.draw_text(10, 10, "Reset Test Result:")
+    ev3.screen.draw_text(10, 30, "After reset: " + str(reset_angle))
+    
+    wait(2000)
+    
+    # 判断是否通过
+    if abs(reset_angle) > MAX_RESET_ERROR:
+        error_msg = "Reset to " + str(reset_angle) + " not 0"
+        display_error("Reset Test", error_msg, "minor")
+        return False
+    else:
+        ev3.screen.clear()
+        ev3.screen.draw_text(10, 40, "Test 4: PASS")
+        ev3.speaker.beep(frequency=600, duration=200)
+        wait(1500)
+        return True
+
+def test_gyro_continuous_monitoring():
+    """
+    持续监控模式
+    实时显示陀螺仪读数，按CENTER退出
+    用于手动检查和长时间观察
+    """
+    ev3.screen.clear()
+    ev3.screen.draw_text(10, 10, "Continuous Monitor")
+    ev3.screen.draw_text(10, 30, "Rotate robot")
+    ev3.screen.draw_text(10, 50, "to test response")
+    ev3.screen.draw_text(10, 70, "CENTER to exit")
+    wait(2000)
+    
+    gyro.reset_angle(0)
+    wait(100)
+    
+    last_angle = 0
+    max_change_per_cycle = 0
+    reading_count = 0
+    anomaly_count = 0
     
     while True:
-        # 中文：前探过程中随时检测是否发生碰撞
-        if touch_left.pressed() or touch_right.pressed():
-            left_motor.stop(Stop.BRAKE)
-            right_motor.stop(Stop.BRAKE)
-            # 中文：前探时如果撞上障碍，立刻停止、后退
-            drive_straight_pid(-probe_distance, speed=DRIVE_SPEED * 0.6)
-            return (True, 'collision', None)
-        
-        avg_rotation = (abs(left_motor.angle()) + abs(right_motor.angle())) / 2
-        # 中文：已经前进到指定距离，跳出循环
-        if avg_rotation >= target_rotation:
+        # 检查退出按钮
+        if Button.CENTER in ev3.buttons.pressed():
             break
         
-        # 中文：用陀螺仪做直行校正，避免探测歪斜
-        gyro_error = gyro.angle() - initial_gyro
-        correction = 2.0 * gyro_error
-        left_motor.run(DRIVE_SPEED * 0.6 - correction)
-        right_motor.run(DRIVE_SPEED * 0.6 + correction)
-        wait(10)
+        current_angle = gyro.angle()
+        change = abs(current_angle - last_angle)
+        reading_count += 1
+        
+        # 记录最大变化
+        if change > max_change_per_cycle:
+            max_change_per_cycle = change
+        
+        # 检测异常跳变（单次变化>100度可能有问题）
+        if change > 100:
+            anomaly_count += 1
+            ev3.speaker.beep(frequency=1500, duration=50)
+        
+        # 更新屏幕
+        ev3.screen.clear()
+        ev3.screen.draw_text(10, 10, "Monitor Mode")
+        ev3.screen.draw_text(10, 25, "Angle: " + str(int(current_angle)))
+        ev3.screen.draw_text(10, 40, "Change: " + str(int(change)))
+        ev3.screen.draw_text(10, 55, "Max: " + str(int(max_change_per_cycle)))
+        ev3.screen.draw_text(10, 70, "Anomaly: " + str(anomaly_count))
+        ev3.screen.draw_text(10, 85, "Readings: " + str(reading_count))
+        ev3.screen.draw_text(10, 100, "CENTER=exit")
+        
+        last_angle = current_angle
+        wait(100)
     
-    left_motor.stop(Stop.BRAKE)
-    right_motor.stop(Stop.BRAKE)
-    wait(100)  # 中文：短暂停止，等待惯性消失
+    # 显示统计
+    ev3.screen.clear()
+    ev3.screen.draw_text(10, 10, "Monitor Summary:")
+    ev3.screen.draw_text(10, 30, "Readings: " + str(reading_count))
+    ev3.screen.draw_text(10, 50, "Anomalies: " + str(anomaly_count))
+    ev3.screen.draw_text(10, 70, "Max change: " + str(int(max_change_per_cycle)))
     
-    # 中文：第六步，前探后再次测距，分析距离变化幅度，如果变化剧烈说明前面是拐角
-    try:
-        probe_distance_reading = ultrasonic.distance()
-        if probe_distance_reading > 0 and probe_distance_reading <= 2000:
-            distance_change = abs(probe_distance_reading - initial_distance)
-            
-            # 中文：如果距离突然变化超过100mm，判定为拐角。先退回原位，再报告“corner_detected”
-            if distance_change > 100:
-                # 中文：退回到原位
-                drive_straight_pid(-probe_distance, speed=DRIVE_SPEED * 0.6)
-                last_valid_wall_distance = initial_distance
-                return (True, 'corner_detected', last_valid_wall_distance)
-    except:
-        # 中文：如果探测超声波异常，忽略
-        pass
+    if anomaly_count > 5:
+        ev3.screen.draw_text(10, 90, "WARNING: Unstable!")
+        sound_alarm_warning()
+    else:
+        ev3.screen.draw_text(10, 90, "Looks good!")
+        ev3.speaker.beep(frequency=600, duration=200)
     
-    # 中文：最后一步，不论前探测出什么，都要退回原位置，保证机器人实际位置不变
-    drive_straight_pid(-probe_distance, speed=DRIVE_SPEED * 0.6)
-    wait(100)
-    
-    # 中文：最终判断为无需调整，返回False和当前平均距离
-    last_valid_wall_distance = avg_distance
-    return (False, None, avg_distance)
+    wait(3000)
 
-# 这个方法是根据机器人与墙的相对位置来判断应该采取哪种恢复策略, 也就是恢复策略的判断依据
-def check_pose_and_adjust():
+def run_all_tests():
     """
-    快速姿态检查，仅返回是否需要立即恢复的标志，不直接执行动作。
-    返回:
-        (needs_adjust, reason, distance_mm)
-        reason ∈ {'collision', 'too_close', None}
+    运行所有测试并生成报告
+    
+    Returns:
+        True if all tests passed, False otherwise
     """
-    global last_valid_wall_distance
-    update_odometry()
+    test_results = []
+    test_names = []
     
-    left_pressed = touch_left.pressed()
-    right_pressed = touch_right.pressed()
+    # 测试1: 基本读数
+    test_names.append("Basic Read")
+    test_results.append(test_gyro_basic_read())
     
-    if left_pressed or right_pressed:
-        return (True, 'collision', None)
+    # 测试2: 漂移
+    test_names.append("Drift Test")
+    test_results.append(test_gyro_drift())
     
-    try:
-        distance = ultrasonic.distance()
-        if distance <= 0 or distance > 2000:
-            return (False, None, None)
-    except:
-        return (False, None, None)
+    # 测试3: 旋转
+    test_names.append("Rotation")
+    test_results.append(test_gyro_rotation())
     
-    last_valid_wall_distance = distance
-    if distance < TARGET_WALL_DISTANCE_MM - 50:
-        return (True, 'too_close', distance)
+    # 测试4: 重置
+    test_names.append("Reset")
+    test_results.append(test_gyro_reset())
     
-    return (False, None, distance)
-
-
-def apply_wall_adjustment(adjustment_type, measured_distance=None):
-    """
-    根据姿态检查结果执行相应的恢复/调整动作。
-    返回True表示确实执行了调整。
-    """
-    if adjustment_type == 'collision':
-        print("Applying collision recovery...")
-        handle_collision_recovery_intelligent()
+    # 生成报告
+    ev3.screen.clear()
+    ev3.screen.draw_text(10, 5, "=== TEST REPORT ===")
+    
+    y_pos = 25
+    for i in range(len(test_names)):
+        status = "PASS" if test_results[i] else "FAIL"
+        ev3.screen.draw_text(10, y_pos, test_names[i][:10] + ": " + status)
+        y_pos += 15
+    
+    # 统计
+    passed = sum(test_results)
+    total = len(test_results)
+    
+    ev3.screen.draw_text(10, y_pos + 10, "Result: " + str(passed) + "/" + str(total))
+    
+    wait(2000)
+    
+    # 最终判断
+    if all(test_results):
+        ev3.screen.clear()
+        ev3.screen.draw_text(10, 30, "ALL TESTS PASSED!")
+        ev3.screen.draw_text(10, 50, "Gyro is healthy")
+        
+        # 播放成功音乐
+        for i in range(4):
+            ev3.speaker.beep(frequency=600 + i*100, duration=150)
+            wait(100)
+        
+        wait(3000)
         return True
-    
-    if adjustment_type == 'too_close':
-        if measured_distance is not None:
-            print("Adjusting: too close to wall (" + str(int(measured_distance)) + "mm)")
-        else:
-            print("Adjusting: too close to wall")
-        drive_straight_pid(-80, speed=DRIVE_SPEED * 0.6)
-        wait(200)
-        turn_in_place_simple(25, speed=TURN_SPEED * 0.6)
-        wait(150)
-        return True
-    
-    if adjustment_type == 'too_far':
-        if measured_distance is not None:
-            print("Adjusting: too far from wall (" + str(int(measured_distance)) + "mm)")
-        else:
-            print("Adjusting: too far from wall")
-        turn_in_place_simple(-20, speed=TURN_SPEED * 0.7)
-        wait(200)
-        drive_straight_pid(50, speed=DRIVE_SPEED * 0.6)
-        wait(200)
-        return True
-    
-    global last_valid_wall_distance
-    if adjustment_type == 'corner_detected':
-        print("Adjusting: corner detected, handling turn...")
-        left_pressed = touch_left.pressed()
-        right_pressed = touch_right.pressed()
-        effective_distance = measured_distance if measured_distance is not None else last_valid_wall_distance
-        last_valid_wall_distance = effective_distance
-        if left_pressed or right_pressed:
-            drive_straight_pid(-100, speed=DRIVE_SPEED * 0.7)
-            wait(200)
-            turn_in_place_simple(60, speed=TURN_SPEED * 0.8)
-            wait(200)
-            drive_straight_pid(80, speed=DRIVE_SPEED * 0.6)
-        else:
-            if abs(effective_distance - TARGET_WALL_DISTANCE_MM) <= CORNER_DISTANCE_TOLERANCE_MM:
-                print("Corner bypass using steady distance " + str(int(effective_distance)) + "mm")
-                drive_straight_pid(80, speed=DRIVE_SPEED * 0.7)
-                wait(200)
-                turn_in_place_simple(-85, speed=TURN_SPEED * 0.8)
-                wait(200)
-                drive_straight_pid(60, speed=DRIVE_SPEED * 0.6)
-                wait(200)
-                return True
-            drive_straight_pid(120, speed=DRIVE_SPEED * 0.7)
-            wait(200)
-            for i in range(3):
-                try:
-                    distance_left = ultrasonic.distance()
-                except:
-                    distance_left = None
-                
-                if distance_left is not None and distance_left < TARGET_WALL_DISTANCE_MM + 40:
-                    turn_in_place_simple(-80, speed=TURN_SPEED * 0.7)
-                    wait(200)
-                    break
-                wait(100)
-            else:
-                turn_in_place_simple(-50, speed=TURN_SPEED * 0.7)
-                wait(200)
-        return True
-    
-    return False
-
-
-def assess_and_correct_pose(run_deep_check=True):
-    """
-    组合快速检测与智能检测；可根据 run_deep_check 决定是否执行深度探测。
-    返回:
-        (did_adjust, adjustment_reason, measured_distance)
-    """
-    quick_needs, quick_reason, quick_distance = check_pose_and_adjust()
-    if quick_needs:
-        apply_wall_adjustment(quick_reason, quick_distance)
-        return (True, quick_reason, quick_distance)
-    
-    if not run_deep_check:
-        return (False, None, quick_distance)
-    
-    needs_adjust, adjustment_type, check_distance = check_pose_intelligent()
-    if needs_adjust:
-        apply_wall_adjustment(adjustment_type, check_distance)
-        return (True, adjustment_type, check_distance)
-    
-    return (False, None, check_distance)
-
-
-def prepare_wall_following(max_attempts=3):
-    """
-    在开始沿墙前，预先进行若干次姿态检查，确保距离墙体稳定。
-    """
-    attempts = 0
-    while attempts < max_attempts:
-        adjusted, reason, _ = assess_and_correct_pose(run_deep_check=(attempts == 0))
-        if not adjusted:
-            print("Wall follow prep: pose looks good.")
-            return
-        attempts += 1
-        print("Wall follow prep: adjustment (" + str(reason) + ") applied, rechecking...")
-        wait(200)
-    print("Wall follow prep: reached max adjustments, proceeding with caution.")
-
-# 沿着墙走，直到接近hit point, 核心的算法部分
-
-def follow_wall_until_hit_point(hit_point_x, hit_point_y, target_distance_mm=TARGET_WALL_DISTANCE_MM, speed=DRIVE_SPEED):
-    """
-    沿墙前进直到回到hit point，用走一步检查一步的“死算”方式，防止累积误差
-    """
-
-    global last_valid_wall_distance
-    # 初始化PID相关变量（所有增益都较弱，防止过度反应）
-    integral = 0
-    last_error = 0
-    last_distance = target_distance_mm
-    ALPHA = 0.5  # 滤波参数，用于距离平滑
-
-    # 重置左右轮编码器
-    left_motor.reset_angle(0)
-    right_motor.reset_angle(0)
-
-    step_count = 0  # 步数计数
-    min_distance_seen = float('inf')  # 跟踪离hit点最近的距离
-    initial_distance_to_hit = None    # 首次记录距离hit点的位置
-    max_distance_from_hit = 0         # 记录离hit点最远的距离
-
-    while True:
-        step_count += 1  # 步号+1
-
-        # ========== 步骤1：走一步 ==========
-        # 计算这一步需要转多少度（将距离转换为电机角度）
-        target_rotation = (STEP_DISTANCE_MM / WHEEL_CIRCUMFERENCE_MM) * 360
-
-        # 读取超声波测距，做平滑处理（防止噪声带来的大跳变）
-        try:
-            raw_distance = ultrasonic.distance()
-            if raw_distance <= 0 or raw_distance > 2000:
-                # 距离异常就用上一次的
-                current_distance = last_distance
-            else:
-                current_distance = ALPHA * raw_distance + (1 - ALPHA) * last_distance
-                last_valid_wall_distance = current_distance
-        except:
-            # 读取异常也用上次的
-            current_distance = last_distance
-
-        last_distance = current_distance  # 存档本次测距
-
-        # 计算距离误差，准备PID
-        error = target_distance_mm - current_distance
-
-        # PID控制部分（参数都取较小，防止突兀修正）
-        p = WALL_KP * error
-        integral += error * 0.1  # 积分项带缩放，防积分爆炸
-        integral = max(-20, min(20, integral))  # 限制积分项范围
-        i = WALL_KI * integral
-        derivative = (error - last_error) / 1.0
-        d = WALL_KD * derivative
-        last_error = error
-
-        correction = p + i + d
-        # 再限制修正量，放缓反应速度
-        correction = max(-60, min(60, correction))
-
-        # 按照PID调整之后的左右轮速度
-        # 如果太靠近墙壁（error>0，correction>0），左电机快，机器人右转，远离墙
-        # 如果太远，则右轮快，机器人左转，靠近墙
-        left_speed = speed + correction
-        right_speed = speed - correction
-
-        # 限制实际速度（安全+防止速度过大形变）
-        min_speed = 50
-        max_speed = speed * 1.4
-        left_speed = max(min_speed, min(max_speed, left_speed))
-        right_speed = max(min_speed, min(max_speed, right_speed))
-
-        # 每走一步都清零电机转角，记录起始陀螺仪角度
-        left_motor.reset_angle(0)
-        right_motor.reset_angle(0)
-        initial_gyro = gyro.angle()
-
-        while True:
-            # 检查碰撞（触碰传感器是否按下）
-            left_pressed = touch_left.pressed()
-            right_pressed = touch_right.pressed()
-
-            if left_pressed or right_pressed:
-                left_motor.stop(Stop.BRAKE)
-                right_motor.stop(Stop.BRAKE)
-                wait(100)
-
-                # 智能碰撞恢复（根据哪个传感器撞到来调整）
-                handle_collision_recovery_intelligent()
-                integral = 0
-                last_error = 0
-                break
-
-            # 用陀螺仪纠偏直线（防止偏航）
-            gyro_error = gyro.angle() - initial_gyro
-            gyro_correction = 2.0 * gyro_error  # 校准比例
-            gyro_correction = max(-20, min(20, gyro_correction))  # 避免修正过大
-
-            left_step_speed = left_speed - gyro_correction
-            right_step_speed = right_speed + gyro_correction
-
-            # 运行电机前进一步
-            left_motor.run(left_step_speed)
-            right_motor.run(right_step_speed)
-
-            # 判断走的距离是否达到本步目标
-            avg_rotation = (abs(left_motor.angle()) + abs(right_motor.angle())) / 2
-            if avg_rotation >= target_rotation:
-                left_motor.stop(Stop.BRAKE)
-                right_motor.stop(Stop.BRAKE)
-                break
-
-            wait(10)  # 循环检测响应快一些
-
-        # 步进完成后短暂停顿
-        wait(50)
-
-        # ========== 步骤2：姿态检查和必要调整 ==========
-        run_deep_check = (step_count == 1) or (step_count % STEP_CHECK_INTERVAL == 0)
-        adjusted, adjustment_reason, check_distance = assess_and_correct_pose(run_deep_check=run_deep_check)
-        if adjusted:
-            integral = 0
-            last_error = 0
-            last_distance = target_distance_mm
-            wait(150)
-            continue
-
-        if check_distance is None:
-            check_distance = current_distance
-
-        # ========== 步骤3：判断是否回到hit_point ==========
-        dist_to_hit = distance_to_point(hit_point_x, hit_point_y)
-
-        # 初次记录离hit点的距离，用于判断是否真的绕了一圈
-        if initial_distance_to_hit is None:
-            initial_distance_to_hit = dist_to_hit
-            print("初始距离hit点：" + str(int(dist_to_hit)) + " mm")
-
-        # 记录离hit点的最近和最远处
-        if dist_to_hit < min_distance_seen:
-            min_distance_seen = dist_to_hit
-        if dist_to_hit > max_distance_from_hit:
-            max_distance_from_hit = dist_to_hit
-
-        # 如果距离足够近（且已绕墙远走过一段），就判定为走完一圈
-        if dist_to_hit < HIT_POINT_TOLERANCE_MM:
-            if step_count > 20 and max_distance_from_hit > initial_distance_to_hit + 200:
-                print("已回到hit点！距离为：" + str(int(dist_to_hit)) + " mm")
-                print("总步数：" + str(step_count))
-                print("最小离hit点距离：" + str(int(min_distance_seen)) + " mm")
-                print("最大离hit点距离：" + str(int(max_distance_from_hit)) + " mm")
-                break
-
-        # ========== 步骤4：每隔5步更新界面，显示进展和传感器状态 ==========
-        if step_count % 5 == 0:
-            ev3.screen.clear()
-            ev3.screen.draw_text(5, 5, "Step: " + str(step_count))
-            if check_distance is not None:
-                ev3.screen.draw_text(5, 25, "Dist: " + str(int(check_distance)))
-            else:
-                ev3.screen.draw_text(5, 25, "Dist: N/A")
-            ev3.screen.draw_text(5, 45, "To hit: " + str(int(dist_to_hit)))
-
-            # 显示触碰传感器状态
-            left_status = "L" if touch_left.pressed() else " "
-            right_status = "R" if touch_right.pressed() else " "
-            ev3.screen.draw_text(5, 65, "Sensors: " + left_status + right_status)
-
-        wait(100)  # 步与步之间短暂延时
-
-    # 停止电机，并更新里程计，最终统计
-    left_motor.stop(Stop.BRAKE)
-    right_motor.stop(Stop.BRAKE)
-    update_odometry()
-    print("已经完成沿墙一圈，总步数：" + str(step_count))
-
-
-# def navigate_back_to_start():
-#     """
-#     Navigate back to start position (2.0 m, 0.5 m) using odometry.
-#     """
-#     print("="*50)
-#     print("NAVIGATING BACK TO START")
-#     print("="*50)
-    
-#     # Update odometry
-#     update_odometry()
-    
-#     # Calculate distance and angle to start
-#     dx = START_POINT_X_MM - robot_x
-#     dy = START_POINT_Y_MM - robot_y
-#     distance_to_start = math.sqrt(dx*dx + dy*dy)
-#     target_heading = math.degrees(math.atan2(dy, dx))
-    
-#     print("Current position: (" + str(int(robot_x)) + ", " + str(int(robot_y)) + ") mm")
-#     print("Current heading: " + str(int(robot_heading)) + "°")
-#     print("Distance to start: " + str(int(distance_to_start)) + " mm")
-#     print("Target heading: " + str(int(target_heading)) + "°")
-    
-#     # Calculate heading error and normalize
-#     heading_error = target_heading - robot_heading
-#     heading_error = normalize_angle(heading_error)
-    
-#     # Turn to face start position
-#     if abs(heading_error) > 5:
-#         print("Turning " + str(int(heading_error)) + "° toward start...")
-#         turn_in_place_simple(heading_error, speed=TURN_SPEED)
-#         wait(200)
-#     else:
-#         print("Already facing start direction")
-    
-#     # Drive straight to start
-#     print("Driving " + str(int(distance_to_start)) + " mm to start...")
-#     drive_straight_pid(distance_to_start, speed=DRIVE_SPEED)
-    
-#     # Final position check
-#     update_odometry()
-#     final_distance = distance_to_point(START_POINT_X_MM, START_POINT_Y_MM)
-#     print("Final position: (" + str(int(robot_x)) + ", " + str(int(robot_y)) + ") mm")
-#     print("Final distance to start: " + str(int(final_distance)) + " mm")
-    
-#     if final_distance > 50:
-#         print("WARNING: Did not reach start accurately!")
-#     else:
-#         print("Successfully returned to start!")
-
+    else:
+        ev3.screen.clear()
+        ev3.screen.draw_text(10, 20, "TESTS FAILED!")
+        ev3.screen.draw_text(10, 40, "Gyro has issues")
+        ev3.screen.draw_text(10, 60, str(total - passed) + " test(s) failed")
+        ev3.screen.draw_text(10, 80, "Check sensor!")
+        
+        # 发出严重警报
+        sound_alarm_critical()
+        
+        wait(3000)
+        return False
 
 # ============================ MAIN PROGRAM =============================
 
 def main():
     """
-    Main program that executes the complete Lab 3 task sequence.
+    主程序 - 陀螺仪测试菜单
     """
     try:
-        # ========== Startup ==========
-        ev3.speaker.beep()
-
-        # Wait for button press
+        # 欢迎界面
+        ev3.screen.clear()
+        ev3.screen.draw_text(10, 20, "GYRO TEST PROGRAM")
+        ev3.screen.draw_text(10, 40, "==================")
+        ev3.speaker.beep(frequency=800, duration=200)
+        wait(2000)
+        
         while True:
-            if Button.CENTER in ev3.buttons.pressed():
+            # 显示菜单
+            ev3.screen.clear()
+            ev3.screen.draw_text(10, 5, "Select Test:")
+            ev3.screen.draw_text(10, 25, "UP: All Tests")
+            ev3.screen.draw_text(10, 40, "CENTER: Monitor")
+            ev3.screen.draw_text(10, 55, "DOWN: Individual")
+            ev3.screen.draw_text(10, 70, "LEFT: Basic Read")
+            ev3.screen.draw_text(10, 85, "RIGHT: Exit")
+            
+            # 等待按钮
+            while True:
+                buttons = ev3.buttons.pressed()
+                
+                if Button.UP in buttons:
+                    # 运行所有测试
+                    ev3.speaker.beep(frequency=600, duration=100)
+                    wait(300)
+                    run_all_tests()
+                    break
+                
+                elif Button.CENTER in buttons:
+                    # 连续监控模式
+                    ev3.speaker.beep(frequency=600, duration=100)
+                    wait(300)
+                    test_gyro_continuous_monitoring()
+                    break
+                
+                elif Button.DOWN in buttons:
+                    # 单独测试菜单
+                    ev3.speaker.beep(frequency=600, duration=100)
+                    wait(300)
+                    individual_test_menu()
+                    break
+                
+                elif Button.LEFT in buttons:
+                    # 快速基本读数测试
+                    ev3.speaker.beep(frequency=600, duration=100)
+                    wait(300)
+                    test_gyro_basic_read()
+                    break
+                
+                elif Button.RIGHT in buttons:
+                    # 退出程序
+                    ev3.screen.clear()
+                    ev3.screen.draw_text(10, 40, "Exiting...")
+                    ev3.speaker.beep(frequency=400, duration=200)
+                    wait(1000)
+                    return
+                
+                wait(10)
+            
+            wait(500)  # 防止按钮连按
+    
+    except Exception as e:
+        # 异常处理
+        ev3.screen.clear()
+        ev3.screen.draw_text(10, 20, "PROGRAM ERROR!")
+        ev3.screen.draw_text(10, 40, "Exception caught")
+        
+        sound_alarm_critical()
+        
+        wait(3000)
+
+def individual_test_menu():
+    """
+    单独测试菜单
+    """
+    while True:
+        ev3.screen.clear()
+        ev3.screen.draw_text(10, 5, "Individual Tests:")
+        ev3.screen.draw_text(10, 25, "UP: Basic Read")
+        ev3.screen.draw_text(10, 40, "CENTER: Drift")
+        ev3.screen.draw_text(10, 55, "DOWN: Rotation")
+        ev3.screen.draw_text(10, 70, "LEFT: Reset")
+        ev3.screen.draw_text(10, 85, "RIGHT: Back")
+        
+        while True:
+            buttons = ev3.buttons.pressed()
+            
+            if Button.UP in buttons:
+                ev3.speaker.beep(frequency=600, duration=100)
+                wait(300)
+                test_gyro_basic_read()
                 break
+            
+            elif Button.CENTER in buttons:
+                ev3.speaker.beep(frequency=600, duration=100)
+                wait(300)
+                test_gyro_drift()
+                break
+            
+            elif Button.DOWN in buttons:
+                ev3.speaker.beep(frequency=600, duration=100)
+                wait(300)
+                test_gyro_rotation()
+                break
+            
+            elif Button.LEFT in buttons:
+                ev3.speaker.beep(frequency=600, duration=100)
+                wait(300)
+                test_gyro_reset()
+                break
+            
+            elif Button.RIGHT in buttons:
+                ev3.speaker.beep(frequency=600, duration=100)
+                wait(300)
+                return
+            
             wait(10)
         
-        ev3.speaker.beep()
-        wait(1000)
-        
-        # ========== Phase 1: Drive Forward Until Obstacle Detected ==========
-
-        
-        if not drive_until_obstacle_detected(speed=DRIVE_SPEED):
-            return
-        
         wait(500)
-        
-        # ========== Phase 2: Record Hit Point and Back Up ==========
-
-        
-        # Record hit point at detection point
-        # According to spec: "The point directly in front of your robot and 20 cm away 
-        # from the obstacle's front wall will be known as the hit point."
-        # We record at detection, then back up 20cm to the actual hit point location
-        hit_point_x = robot_x
-        hit_point_y = robot_y
-        hit_point_heading = robot_heading
-        
-        # Back away from obstacle to reach actual hit point (20cm from obstacle front wall)
-        drive_straight_pid(-BACKUP_DISTANCE_MM, speed=DRIVE_SPEED)
-        wait(500)
-        
-        # Update hit point to actual location (after backing up)
-        update_odometry()
-        hit_point_x = robot_x
-        hit_point_y = robot_y
-        hit_point_heading = robot_heading
-
-        
-        # ========== Phase 3: Turn Right 90° ==========
-
-        
-        #turn_in_place_pid(90, speed=TURN_SPEED)  # Positive = clockwise (right)
-        turn_in_place_simple(90, speed=TURN_SPEED)  # Positive = clockwise (right)
-        wait(500)
-        
-        # Reset gyro to establish new "forward" direction (parallel to wall)
-        gyro.reset_angle(0)
-        wait(300)
-        update_odometry()
-        prepare_wall_following()
-        
-        ev3.speaker.beep()
-        wait(500)
-        
-        # ========== Phase 4: Wall Following Until Back Near Hit Point ==========
-        
-        follow_wall_until_hit_point(hit_point_x, hit_point_y, 
-                                   target_distance_mm=TARGET_WALL_DISTANCE_MM, 
-                                   speed=DRIVE_SPEED)
-        wait(500)
-        
-        # ========== Phase 5: Turn Away and Return to Start ==========
-
-        #turn_in_place_pid(90, speed=TURN_SPEED)  # Turn right (away from wall)
-        turn_in_place_simple(90, speed=TURN_SPEED)  # Turn right (away from wall)
-        wait(500)
-        
-        #navigate_back_to_start()
-        
-        # ========== SUCCESS! ==========
-        
-        # Play victory beeps
-        for i in range(4):
-            ev3.speaker.beep(frequency=800 + i*200, duration=100)
-            wait(150)
-        
-        ev3.screen.clear()
-        ev3.screen.print("Complete!")
-        
-    except Exception as e:
-        # ========== Error Handling ==========
-        import traceback
-        traceback.print_exc()
-        
-        # Emergency stop
-        left_motor.stop(Stop.BRAKE)
-        right_motor.stop(Stop.BRAKE)
-        
-        # Play error beeps
-        ev3.speaker.beep(frequency=400, duration=300)
-        wait(200)
-        ev3.speaker.beep(frequency=400, duration=300)
-
 
 # ============================ RUN PROGRAM =============================
 
