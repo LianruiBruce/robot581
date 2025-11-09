@@ -338,7 +338,7 @@ def drive_until_obstacle_detected(speed=DRIVE_SPEED):
     Beeps when obstacle is found.
     
     Returns:
-        True if obstacle detected, False if timeout
+        float: 从起点到碰撞点的距离（mm），如果超时则返回 None
     """
     global gyro_offset
     
@@ -371,7 +371,11 @@ def drive_until_obstacle_detected(speed=DRIVE_SPEED):
             right_motor.stop(Stop.BRAKE)
             ev3.speaker.beep()
             update_odometry()
-            return True
+            
+            # 计算从起点到碰撞点的总直行距离
+            avg_rot = (abs(left_motor.angle()) + abs(right_motor.angle())) / 2
+            dist_mm = (avg_rot / 360.0) * WHEEL_CIRCUMFERENCE_MM
+            return dist_mm  # 返回距离（mm）
         
         # Gyro correction to maintain straight path
         gyro_error = gyro.angle() - initial_gyro
@@ -680,21 +684,24 @@ def prepare_wall_following(max_attempts=3):
 
 # 沿着墙走，直到接近hit point, 核心的算法部分
 
-def follow_wall_until_hit_point(hit_point_x, hit_point_y, wall_start_x=None, wall_start_y=None, target_distance_mm=TARGET_WALL_DISTANCE_MM, speed=DRIVE_SPEED):
+def follow_wall_until_hit_point(hit_point_x, hit_point_y, wall_start_x=None, wall_start_y=None, 
+                                target_distance_mm=TARGET_WALL_DISTANCE_MM, speed=DRIVE_SPEED,
+                                exit_straight_distance_mm=0):
     """
-    沿墙前进直到回到 Hit Point，用走一步检查一步的方式，防止累积误差
+    沿墙前进直到回到 Hit Point，并在回到时执行离开动作
     
     Args:
         hit_point_x, hit_point_y: Hit Point 坐标（定义为 2000, 500）
         wall_start_x, wall_start_y: 开始沿墙的坐标（通常与 hit_point 相同，因为转向是原地转向）
         target_distance_mm: 目标墙距（默认 200mm）
         speed: 前进速度
+        exit_straight_distance_mm: 离开时直走的距离（从起点到Hit Point的距离）
     
     工作原理：
         1. 机器人从 Hit Point 右转90度后开始沿墙
         2. 沿着障碍物左侧绕行一圈
         3. 判断标准：当前位置距离目标点 < 100mm 时认为已回到起点
-        4. Hit Point 坐标是在后退20cm后手动设置为 (2000, 500)
+        4. 回到起点后：停车 → 右转90° → 直走 exit_straight_distance_mm → 停止
     """
     
     # 如果提供了 wall_start 坐标，使用它；否则使用 hit_point
@@ -846,11 +853,44 @@ def follow_wall_until_hit_point(hit_point_x, hit_point_y, wall_start_x=None, wal
         # 如果距离足够近（且已绕墙远走过一段），就判定为走完一圈
         if dist_to_target < HIT_POINT_TOLERANCE_MM:
             if step_count > 20 and max_distance_from_hit > initial_distance_to_hit + 200:
-                print("已回到起点！距离为：" + str(int(dist_to_target)) + " mm")
-                print("总步数：" + str(step_count))
-                print("最小离起点距离：" + str(int(min_distance_seen)) + " mm")
-                print("最大离起点距离：" + str(int(max_distance_from_hit)) + " mm")
-                break
+                print("=" * 50)
+                print("已回到 Hit Point！")
+                print("距离: " + str(int(dist_to_target)) + " mm")
+                print("总步数: " + str(step_count))
+                print("最小离起点距离: " + str(int(min_distance_seen)) + " mm")
+                print("最大离起点距离: " + str(int(max_distance_from_hit)) + " mm")
+                print("=" * 50)
+                
+                # ========== 立即执行离开动作 ==========
+                
+                # 1) 立即停车
+                left_motor.stop(Stop.BRAKE)
+                right_motor.stop(Stop.BRAKE)
+                ev3.speaker.beep(frequency=1000, duration=200)
+                wait(500)
+                
+                # 2) 原地右转 90°
+                print("原地右转 90°...")
+                turn_in_place_simple(90, speed=TURN_SPEED)
+                wait(300)
+                
+                # 3) 直行"开头直行的距离"（起点→Hit Point）
+                if exit_straight_distance_mm > 0:
+                    print("直行返回起始点，距离: " + str(int(exit_straight_distance_mm)) + " mm")
+                    drive_straight_pid(exit_straight_distance_mm, speed=DRIVE_SPEED)
+                    wait(300)
+                
+                # 4) 最终停止并返回
+                left_motor.stop(Stop.BRAKE)
+                right_motor.stop(Stop.BRAKE)
+                update_odometry()
+                
+                print("=" * 50)
+                print("已返回起始点！")
+                print("当前位置: (" + str(int(robot_x)) + ", " + str(int(robot_y)) + ") mm")
+                print("=" * 50)
+                
+                return  # ← 直接结束函数
 
         # ========== 步骤4：每隔5步更新界面，显示进展和传感器状态 ==========
         if step_count % 5 == 0:
@@ -961,15 +1001,17 @@ def main():
         print("=" * 50)
         
         # ========== Phase 1: Drive Forward Until Obstacle Detected ==========
-
         
-        if not drive_until_obstacle_detected(speed=DRIVE_SPEED):
+        # 直行直到碰撞，获取起点→碰撞点的距离
+        dist_to_collision = drive_until_obstacle_detected(speed=DRIVE_SPEED)
+        if dist_to_collision is None:
+            print("错误：未检测到障碍物")
             return
         
+        print("碰撞检测：前进距离 = " + str(int(dist_to_collision)) + " mm")
         wait(500)
         
         # ========== Phase 2: Record Hit Point and Back Up ==========
-
         
         # 后退到 Hit Point（距离障碍物前墙 20cm 的位置）
         # 根据规格："The point directly in front of your robot and 20 cm away 
@@ -987,11 +1029,16 @@ def main():
         hit_point_y = robot_y
         hit_point_heading = robot_heading
         
+        # 记录"离开时要直走的距离"（起点→Hit Point）
+        # 这是从起点到碰撞点的距离减去后退的200mm
+        exit_straight_distance = max(0, dist_to_collision - BACKUP_DISTANCE_MM)
+        
         print("=" * 50)
         print("已到达 Hit Point，设置坐标为：")
         print("X = " + str(int(hit_point_x)) + " mm (2.0 m)")
         print("Y = " + str(int(hit_point_y)) + " mm (0.5 m)")
         print("Heading = " + str(int(hit_point_heading)) + "°")
+        print("离开时直走距离: " + str(int(exit_straight_distance)) + " mm")
         print("=" * 50)
 
         
@@ -1024,21 +1071,17 @@ def main():
         
         # ========== Phase 4: Wall Following Until Back Near Hit Point ==========
         
-        # 沿墙直到回到 Hit Point（也是开始沿墙的位置）
+        # 沿墙直到回到 Hit Point，并在回到时执行离开动作
+        # 离开动作：停车 → 右转90° → 直走 exit_straight_distance → 停止
         follow_wall_until_hit_point(hit_point_x, hit_point_y,
                                    wall_start_x=hit_point_x,
                                    wall_start_y=hit_point_y,
                                    target_distance_mm=TARGET_WALL_DISTANCE_MM, 
-                                   speed=DRIVE_SPEED)
-        wait(500)
+                                   speed=DRIVE_SPEED,
+                                   exit_straight_distance_mm=exit_straight_distance)
         
-        # ========== Phase 5: Turn Away and Return to Start ==========
-
-        #turn_in_place_pid(90, speed=TURN_SPEED)  # Turn right (away from wall)
-        turn_in_place_simple(90, speed=TURN_SPEED)  # Turn right (away from wall)
-        wait(500)
-        
-        navigate_back_to_start()
+        # 注意：离开动作已在 follow_wall_until_hit_point() 内部完成
+        # 不再需要 Phase 5 的转向和导航
         
         # ========== SUCCESS! ==========
         
