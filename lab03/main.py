@@ -48,10 +48,11 @@ HIT_POINT_TOLERANCE_MM = 100  # How close to be considered "back at hit point"
 OBSTACLE_DETECTION_DISTANCE_MM = 300  # Distance to detect obstacle (30 cm)
 CORNER_DISTANCE_TOLERANCE_MM = 80     # 将最后一次正常距离视为拐角的容差
 
-# Starting Point (from lab requirements)
-# NOTE: The starting point is the hit point, which is 20 cm away from the obstacle's front wall.
-START_POINT_X_MM = 2000.0     # 2.0 m
-START_POINT_Y_MM = 500.0      # 0.5 m
+# Hit Point Definition (from lab requirements)
+# NOTE: Hit point is defined as the position 20cm away from obstacle after collision.
+# We set this position as the coordinate reference point (2000, 500).
+HIT_POINT_X_MM = 2000.0     # 2.0 m - 定义Hit Point的X坐标
+HIT_POINT_Y_MM = 500.0      # 0.5 m - 定义Hit Point的Y坐标
 
 # Wall Following PID Parameters (reduced to prevent overreaction)
 WALL_KP = 0.8                 # Reduced proportional gain to prevent overreaction
@@ -88,19 +89,40 @@ gyro.reset_angle(0)
 wait(10)
 
 # Odometry state - track robot position
-robot_x = START_POINT_X_MM    # X position in mm
-robot_y = START_POINT_Y_MM    # Y position in mm
+robot_x = 0.0                 # X position in mm (起始点坐标，从原点开始)
+robot_y = 0.0                 # Y position in mm (起始点坐标，从原点开始)
 robot_heading = 0.0           # Heading in degrees (0 = positive X direction)
 gyro_offset = 0.0             # Offset to handle gyro resets while maintaining global heading
 last_left_angle = 0            # Last left motor encoder reading
 last_right_angle = 0           # Last right motor encoder reading
 last_valid_wall_distance = TARGET_WALL_DISTANCE_MM  # 记录最近一次可靠的墙距读数
 
-# Reset motor encoders
+# Starting position (星星位置) - 记录真正的物理起始点
+start_point_x = 0.0           # 起始点 X 坐标 (物理起始位置)
+start_point_y = 0.0           # 起始点 Y 坐标 (物理起始位置)
+
+# Reset motor encoders and sync with odometry
 left_motor.reset_angle(0)
 right_motor.reset_angle(0)
+last_left_angle = 0  # 同步里程计变量
+last_right_angle = 0  # 同步里程计变量
 
 # ============================ HELPER FUNCTIONS =============================
+
+def reset_and_sync_encoders():
+    """
+    重置电机编码器并同步里程计变量。
+    
+    重要：在任何 reset_angle(0) 之后，必须同步 last_left_angle 和 last_right_angle，
+    避免下次 update_odometry() 时计算出错误的位移（巨大的反向跳变）。
+    
+    建议：在调用此函数前先调用 update_odometry() 清算残余位移。
+    """
+    global last_left_angle, last_right_angle
+    left_motor.reset_angle(0)
+    right_motor.reset_angle(0)
+    last_left_angle = 0
+    last_right_angle = 0
 
 # 这个方法是将角度归一化到-180到180度之间, 也就是角度归一化的函数
 def normalize_angle(angle_deg):
@@ -175,8 +197,9 @@ def drive_straight_pid(distance_mm, speed=DRIVE_SPEED):
     target_rotation = (abs(distance_mm) / WHEEL_CIRCUMFERENCE_MM) * 360
     direction = 1 if distance_mm > 0 else -1
     
-    left_motor.reset_angle(0)
-    right_motor.reset_angle(0)
+    # 清算残余位移，然后重置并同步编码器
+    update_odometry()
+    reset_and_sync_encoders()
     initial_gyro = gyro.angle()
     correction = 0
     left_speed = 0
@@ -320,13 +343,14 @@ def drive_until_obstacle_detected(speed=DRIVE_SPEED):
     global gyro_offset
     
     wait(10)
-    left_motor.reset_angle(0)
-    right_motor.reset_angle(0)
     
     # 保存当前全局航向角，然后重置陀螺仪
     update_odometry()
     gyro_offset = robot_heading
     gyro.reset_angle(0)
+    
+    # 重置并同步编码器
+    reset_and_sync_encoders()
     initial_gyro = gyro.angle()
     gyro_error = 0
     left_speed = 0
@@ -456,8 +480,8 @@ def check_pose_intelligent():
     initial_gyro = gyro.angle()        # 中文：记录初始角度，便于直行修正
     
     # 中文：复位电机编码器，准备前行
-    left_motor.reset_angle(0)
-    right_motor.reset_angle(0)
+    update_odometry()  # 清算残余位移
+    reset_and_sync_encoders()
     probe_distance = 50
     target_rotation = (probe_distance / WHEEL_CIRCUMFERENCE_MM) * 360  # 中文：把前行距离转换成编码器角度
     
@@ -658,16 +682,23 @@ def prepare_wall_following(max_attempts=3):
 
 def follow_wall_until_hit_point(hit_point_x, hit_point_y, wall_start_x=None, wall_start_y=None, target_distance_mm=TARGET_WALL_DISTANCE_MM, speed=DRIVE_SPEED):
     """
-    沿墙前进直到回到起点，用走一步检查一步的"死算"方式，防止累积误差
+    沿墙前进直到回到 Hit Point，用走一步检查一步的方式，防止累积误差
     
     Args:
-        hit_point_x, hit_point_y: hit point坐标（保留用于兼容性）
-        wall_start_x, wall_start_y: 开始沿墙的坐标（如果提供，将用此坐标判断是否回到起点）
-        target_distance_mm: 目标墙距
-        speed: 速度
+        hit_point_x, hit_point_y: Hit Point 坐标（定义为 2000, 500）
+        wall_start_x, wall_start_y: 开始沿墙的坐标（通常与 hit_point 相同，因为转向是原地转向）
+        target_distance_mm: 目标墙距（默认 200mm）
+        speed: 前进速度
+    
+    工作原理：
+        1. 机器人从 Hit Point 右转90度后开始沿墙
+        2. 沿着障碍物左侧绕行一圈
+        3. 判断标准：当前位置距离目标点 < 100mm 时认为已回到起点
+        4. Hit Point 坐标是在后退20cm后手动设置为 (2000, 500)
     """
     
     # 如果提供了 wall_start 坐标，使用它；否则使用 hit_point
+    # 注意：由于转向是原地转向，这两个坐标通常是相同的
     target_x = wall_start_x if wall_start_x is not None else hit_point_x
     target_y = wall_start_y if wall_start_y is not None else hit_point_y
 
@@ -678,9 +709,9 @@ def follow_wall_until_hit_point(hit_point_x, hit_point_y, wall_start_x=None, wal
     last_distance = target_distance_mm
     ALPHA = 0.5  # 滤波参数，用于距离平滑
 
-    # 重置左右轮编码器
-    left_motor.reset_angle(0)
-    right_motor.reset_angle(0)
+    # 清算残余位移，重置并同步编码器
+    update_odometry()
+    reset_and_sync_encoders()
 
     step_count = 0  # 步数计数
     min_distance_seen = float('inf')  # 跟踪离hit点最近的距离
@@ -738,8 +769,8 @@ def follow_wall_until_hit_point(hit_point_x, hit_point_y, wall_start_x=None, wal
         right_speed = max(min_speed, min(max_speed, right_speed))
 
         # 每走一步都清零电机转角，记录起始陀螺仪角度
-        left_motor.reset_angle(0)
-        right_motor.reset_angle(0)
+        # 注意：这里不需要先 update_odometry()，因为我们只是为了测量本步距离
+        reset_and_sync_encoders()
         initial_gyro = gyro.angle()
 
         while True:
@@ -769,6 +800,9 @@ def follow_wall_until_hit_point(hit_point_x, hit_point_y, wall_start_x=None, wal
             # 运行电机前进一步
             left_motor.run(left_step_speed)
             right_motor.run(right_step_speed)
+
+            # ★ 每步内做里程计积分，捕捉弧线位移
+            update_odometry()
 
             # 判断走的距离是否达到本步目标
             avg_rotation = (abs(left_motor.angle()) + abs(right_motor.angle())) / 2
@@ -844,52 +878,54 @@ def follow_wall_until_hit_point(hit_point_x, hit_point_y, wall_start_x=None, wal
 
 def navigate_back_to_start():
     """
-    Navigate back to start position (2.0 m, 0.5 m) using odometry.
+    Navigate back to starting point (星星位置 ⭐) using odometry.
+    从 Hit Point 返回到最初的起始点 (0, 0)。
     """
     print("="*50)
-    print("NAVIGATING BACK TO START")
+    print("返回起始点（星星位置 ⭐）")
     print("="*50)
     
     # Update odometry
     update_odometry()
     
-    # Calculate distance and angle to start
-    dx = START_POINT_X_MM - robot_x
-    dy = START_POINT_Y_MM - robot_y
+    # Calculate distance and angle to starting point
+    dx = start_point_x - robot_x
+    dy = start_point_y - robot_y
     distance_to_start = math.sqrt(dx*dx + dy*dy)
     target_heading = math.degrees(math.atan2(dy, dx))
     
-    print("Current position: (" + str(int(robot_x)) + ", " + str(int(robot_y)) + ") mm")
-    print("Current heading: " + str(int(robot_heading)) + "°")
-    print("Distance to start: " + str(int(distance_to_start)) + " mm")
-    print("Target heading: " + str(int(target_heading)) + "°")
+    print("当前位置: (" + str(int(robot_x)) + ", " + str(int(robot_y)) + ") mm")
+    print("当前航向: " + str(int(robot_heading)) + "°")
+    print("起始点位置: (" + str(int(start_point_x)) + ", " + str(int(start_point_y)) + ") mm")
+    print("距离起始点: " + str(int(distance_to_start)) + " mm")
+    print("目标航向: " + str(int(target_heading)) + "°")
     
     # Calculate heading error and normalize
     heading_error = target_heading - robot_heading
     heading_error = normalize_angle(heading_error)
     
-    # Turn to face start position
+    # Turn to face starting point
     if abs(heading_error) > 5:
-        print("Turning " + str(int(heading_error)) + "° toward start...")
+        print("转向 " + str(int(heading_error)) + "° 朝向起始点...")
         turn_in_place_simple(heading_error, speed=TURN_SPEED)
         wait(200)
     else:
-        print("Already facing start direction")
+        print("已经朝向起始点方向")
     
-    # Drive straight to start
-    print("Driving " + str(int(distance_to_start)) + " mm to start...")
+    # Drive straight to starting point
+    print("前进 " + str(int(distance_to_start)) + " mm 到起始点...")
     drive_straight_pid(distance_to_start, speed=DRIVE_SPEED)
     
     # Final position check
     update_odometry()
-    final_distance = distance_to_point(START_POINT_X_MM, START_POINT_Y_MM)
-    print("Final position: (" + str(int(robot_x)) + ", " + str(int(robot_y)) + ") mm")
-    print("Final distance to start: " + str(int(final_distance)) + " mm")
+    final_distance = distance_to_point(start_point_x, start_point_y)
+    print("最终位置: (" + str(int(robot_x)) + ", " + str(int(robot_y)) + ") mm")
+    print("距离起始点: " + str(int(final_distance)) + " mm")
     
-    if final_distance > 50:
-        print("WARNING: Did not reach start accurately!")
+    if final_distance > 100:
+        print("警告：未能准确回到起始点！")
     else:
-        print("Successfully returned to start!")
+        print("成功返回起始点！")
 
 
 # ============================ MAIN PROGRAM =============================
@@ -898,6 +934,9 @@ def main():
     """
     Main program that executes the complete Lab 3 task sequence.
     """
+    # 声明所有需要修改的全局变量
+    global start_point_x, start_point_y, robot_x, robot_y, gyro_offset
+    
     try:
         # ========== Startup ==========
         ev3.speaker.beep()
@@ -911,6 +950,16 @@ def main():
         ev3.speaker.beep()
         wait(1000)
         
+        # 记录起始点坐标（星星位置 ⭐）
+        # 此时坐标为 (0, 0)，这是真正的物理起始位置
+        start_point_x = robot_x  # 0.0
+        start_point_y = robot_y  # 0.0
+        print("=" * 50)
+        print("起始点（星星位置）：")
+        print("X = " + str(int(start_point_x)) + " mm")
+        print("Y = " + str(int(start_point_y)) + " mm")
+        print("=" * 50)
+        
         # ========== Phase 1: Drive Forward Until Obstacle Detected ==========
 
         
@@ -922,23 +971,28 @@ def main():
         # ========== Phase 2: Record Hit Point and Back Up ==========
 
         
-        # Record hit point at detection point
-        # According to spec: "The point directly in front of your robot and 20 cm away 
+        # 后退到 Hit Point（距离障碍物前墙 20cm 的位置）
+        # 根据规格："The point directly in front of your robot and 20 cm away 
         # from the obstacle's front wall will be known as the hit point."
-        # We record at detection, then back up 20cm to the actual hit point location
-        hit_point_x = robot_x
-        hit_point_y = robot_y
-        hit_point_heading = robot_heading
-        
-        # Back away from obstacle to reach actual hit point (20cm from obstacle front wall)
         drive_straight_pid(-BACKUP_DISTANCE_MM, speed=DRIVE_SPEED)
         wait(500)
         
-        # Update hit point to actual location (after backing up)
-        update_odometry()
+        # 重要：在这个位置，我们定义坐标为 (2000, 500)
+        # 这是坐标系的校准点，后续所有坐标都基于这个参考点
+        update_odometry()  # 先结清残余位移
+        # 注意：global 变量已在函数开头声明
+        robot_x = HIT_POINT_X_MM  # 手动设置X坐标为2000mm
+        robot_y = HIT_POINT_Y_MM  # 手动设置Y坐标为500mm
         hit_point_x = robot_x
         hit_point_y = robot_y
         hit_point_heading = robot_heading
+        
+        print("=" * 50)
+        print("已到达 Hit Point，设置坐标为：")
+        print("X = " + str(int(hit_point_x)) + " mm (2.0 m)")
+        print("Y = " + str(int(hit_point_y)) + " mm (0.5 m)")
+        print("Heading = " + str(int(hit_point_heading)) + "°")
+        print("=" * 50)
 
         
         # ========== Phase 3: Turn Right 90° ==========
@@ -951,17 +1005,16 @@ def main():
         # Reset gyro to establish new "forward" direction (parallel to wall)
         # 重要：在重置陀螺仪前，先保存当前的全局航向角
         update_odometry()  # 确保 robot_heading 是最新的
-        global gyro_offset
+        # 注意：global 变量已在函数开头声明
         gyro_offset = robot_heading  # 保存当前全局航向角作为偏移量
         gyro.reset_angle(0)  # 重置陀螺仪为0（用于沿墙控制）
         wait(300)
         update_odometry()  # 更新后 robot_heading = 0 + gyro_offset，保持全局坐标系一致
         
-        # 记录开始沿墙的坐标（转向后的位置）
-        wall_follow_start_x = robot_x
-        wall_follow_start_y = robot_y
-        wall_follow_start_heading = robot_heading
-        print("开始沿墙位置：X=" + str(int(wall_follow_start_x)) + "mm, Y=" + str(int(wall_follow_start_y)) + "mm")
+        # 更新 hit_point_heading 为转向后的航向角
+        hit_point_heading = robot_heading
+        
+        print("Hit Point (开始沿墙位置)：X=" + str(int(hit_point_x)) + "mm, Y=" + str(int(hit_point_y)) + "mm")
         print("全局航向角：" + str(int(robot_heading)) + "°")
         
         prepare_wall_following()
@@ -971,10 +1024,10 @@ def main():
         
         # ========== Phase 4: Wall Following Until Back Near Hit Point ==========
         
-        # 使用开始沿墙的坐标作为判断依据
+        # 沿墙直到回到 Hit Point（也是开始沿墙的位置）
         follow_wall_until_hit_point(hit_point_x, hit_point_y,
-                                   wall_start_x=wall_follow_start_x,
-                                   wall_start_y=wall_follow_start_y,
+                                   wall_start_x=hit_point_x,
+                                   wall_start_y=hit_point_y,
                                    target_distance_mm=TARGET_WALL_DISTANCE_MM, 
                                    speed=DRIVE_SPEED)
         wait(500)
