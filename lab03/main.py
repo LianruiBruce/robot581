@@ -852,42 +852,6 @@ def follow_wall_until_hit_point(hit_point_x, hit_point_y, wall_start_x=None, wal
 
         wait(100)  # 步与步之间短暂延时
 
-    # 停止电机，并更新里程计，最终统计
-    left_motor.stop(Stop.BRAKE)
-    right_motor.stop(Stop.BRAKE)
-    update_odometry()
-
-
-def navigate_back_to_start():
-    """
-    Navigate back to starting point (星星位置 ⭐) using odometry.
-    从 Hit Point 返回到最初的起始点 (0, 0)。
-    """
-    # Update odometry
-    update_odometry()
-    
-    # Calculate distance and angle to starting point
-    dx = start_point_x - robot_x
-    dy = start_point_y - robot_y
-    distance_to_start = math.sqrt(dx*dx + dy*dy)
-    target_heading = math.degrees(math.atan2(dy, dx))
-    
-    # Calculate heading error and normalize
-    heading_error = target_heading - robot_heading
-    heading_error = normalize_angle(heading_error)
-    
-    # Turn to face starting point
-    if abs(heading_error) > 5:
-        turn_in_place_simple(heading_error, speed=TURN_SPEED)
-        wait(200)
-    
-    # Drive straight to starting point
-    drive_straight_pid(distance_to_start, speed=DRIVE_SPEED)
-    
-    # Final position check
-    update_odometry()
-    final_distance = distance_to_point(start_point_x, start_point_y)
-
 
 # ============================ MAIN PROGRAM =============================
 
