@@ -37,14 +37,14 @@ AXLE_TRACK_MM = 125.0         # Distance between left and right wheels
 WHEEL_CIRCUMFERENCE_MM = math.pi * WHEEL_DIAMETER_MM
 
 # Movement Parameters
-DRIVE_SPEED = 180             # Motor speed in degrees per second for forward motion
+DRIVE_SPEED = 200             # Motor speed in degrees per second for forward motion
 TURN_SPEED = 80               # Motor speed in degrees per second for turning
 
 # Lab 3 Specific Parameters
-BACKUP_DISTANCE_MM = 200      # Distance to back away from obstacle (20 cm)
-TARGET_WALL_DISTANCE_MM = 200 # Target distance from wall during following (20 cm)
-MAX_WALL_DISTANCE_MM = 280    # Maximum allowed distance (28 cm requirement)
-HIT_POINT_TOLERANCE_MM = 100  # How close to be considered "back at hit point"
+BACKUP_DISTANCE_MM = 150      # Distance to back away from obstacle (20 cm)
+TARGET_WALL_DISTANCE_MM = 170 # Target distance from wall during following (20 cm)
+MAX_WALL_DISTANCE_MM = 240    # Maximum allowed distance (28 cm requirement)
+HIT_POINT_TOLERANCE_MM = 120  # How close to be considered "back at hit point"
 OBSTACLE_DETECTION_DISTANCE_MM = 300  # Distance to detect obstacle (30 cm)
 CORNER_DISTANCE_TOLERANCE_MM = 80     # 将最后一次正常距离视为拐角的容差
 
@@ -55,13 +55,13 @@ HIT_POINT_X_MM = 2000.0     # 2.0 m - 定义Hit Point的X坐标
 HIT_POINT_Y_MM = 500.0      # 0.5 m - 定义Hit Point的Y坐标
 
 # Wall Following PID Parameters (reduced to prevent overreaction)
-WALL_KP = 0.8                 # Reduced proportional gain to prevent overreaction
-WALL_KI = 0.005               # Reduced integral gain
-WALL_KD = 0.8                 # Reduced derivative gain
+WALL_KP = 0.55                 # Reduced proportional gain to prevent overreaction
+WALL_KI = 0.003               # Reduced integral gain
+WALL_KD = 0.25                 # Reduced derivative gain
 
 # Dead Reckoning Parameters
-STEP_DISTANCE_MM = 80         # Distance to move in each step (dead reckoning)
-STEP_CHECK_INTERVAL = 10      # Check sensors every N steps
+STEP_DISTANCE_MM = 70         # Distance to move in each step (dead reckoning)
+STEP_CHECK_INTERVAL = 7      # Check sensors every N steps
 
 # Straight Drive PID Parameters
 GYRO_KP = 2.0                 # Gyro correction PID gains
@@ -194,6 +194,7 @@ def drive_straight_pid(distance_mm, speed=DRIVE_SPEED):
         distance_mm: Target distance (positive=forward, negative=backward)
         speed: Base motor speed in degrees per second
     """
+    print("[drive_straight_pid] 开始直行：目标距离 = {} mm，速度 = {}".format(distance_mm, speed))
     target_rotation = (abs(distance_mm) / WHEEL_CIRCUMFERENCE_MM) * 360
     direction = 1 if distance_mm > 0 else -1
     
@@ -256,6 +257,8 @@ def drive_straight_pid(distance_mm, speed=DRIVE_SPEED):
         
         left_motor.run(left_speed)
         right_motor.run(right_speed)
+        print("[drive_straight_pid] 纠偏：误差 = {:.2f}°，修正 = {:.2f}，左轮 = {:.2f}，右轮 = {:.2f}".format(
+            gyro_error, correction, left_speed, right_speed))
 
         wait(20)
         
@@ -266,6 +269,8 @@ def drive_straight_pid(distance_mm, speed=DRIVE_SPEED):
     
     # Final odometry update
     update_odometry()
+    print("[drive_straight_pid] 完成直行：当前坐标 = ({:.1f}, {:.1f})，航向 = {:.1f}°".format(
+        robot_x, robot_y, robot_heading))
 
 # 这个方法是根据陀螺仪角度来控制机器人转向, 也就是转向的控制依据
 def turn_in_place_simple(angle_degrees, speed=TURN_SPEED):
@@ -273,6 +278,7 @@ def turn_in_place_simple(angle_degrees, speed=TURN_SPEED):
     Simple turn-in-place using gyro feedback. No advanced convergence checks.
     Turns robot by the specified angle (positive=clockwise/right, negative=counterclockwise/left).
     """
+    print("[turn_in_place_simple] 开始转向：目标角度 = {}°，速度 = {}".format(angle_degrees, speed))
     initial_gyro = gyro.angle()
     target_gyro = initial_gyro + angle_degrees
 
@@ -309,6 +315,7 @@ def turn_in_place_simple(angle_degrees, speed=TURN_SPEED):
 
         left_motor.run(turn)
         right_motor.run(-turn)
+        print("[turn_in_place_simple] 转向中：误差 = {:.2f}°，输出 = {:.2f}".format(error, turn))
         wait(20)
 
     left_motor.stop(Stop.BRAKE)
@@ -317,6 +324,7 @@ def turn_in_place_simple(angle_degrees, speed=TURN_SPEED):
     
     # 更新里程计，同步编码器读数和航向角
     update_odometry()
+    print("[turn_in_place_simple] 转向完成：当前航向 = {:.1f}°".format(robot_heading))
 
 ## NOTE: An alternative PID-based turn_in_place implementation used for experimentation
 ## was previously left here at module scope with the function header commented out.
@@ -336,6 +344,7 @@ def drive_until_obstacle_detected(speed=DRIVE_SPEED):
     """
     global gyro_offset
     
+    print("[drive_until_obstacle_detected] 开始前进，速度 = {}".format(speed))
     wait(10)
     
     # 保存当前全局航向角，然后重置陀螺仪
@@ -356,6 +365,8 @@ def drive_until_obstacle_detected(speed=DRIVE_SPEED):
     while True:  
         # Update odometry during movement
         update_odometry()
+        print("[drive_until_obstacle_detected] 前进中：gyro = {:.2f}°，触碰左 = {}，触碰右 = {}".format(
+            gyro.angle(), touch_left.pressed(), touch_right.pressed()))
     
         
         # CRITICAL: ONLY check touch sensors - ultrasonic is on left side, not front!
@@ -369,6 +380,7 @@ def drive_until_obstacle_detected(speed=DRIVE_SPEED):
             # 计算从起点到碰撞点的总直行距离
             avg_rot = (abs(left_motor.angle()) + abs(right_motor.angle())) / 2
             dist_mm = (avg_rot / 360.0) * WHEEL_CIRCUMFERENCE_MM
+            print("[drive_until_obstacle_detected] 检测到碰撞：距离 = {:.1f} mm".format(dist_mm))
             return dist_mm  # 返回距离（mm）
         
         # Gyro correction to maintain straight path
@@ -379,6 +391,8 @@ def drive_until_obstacle_detected(speed=DRIVE_SPEED):
         
         left_speed = speed - correction
         right_speed = speed + correction
+        print("[drive_until_obstacle_detected] 纠偏：误差 = {:.2f}°，修正 = {:.2f}，左轮 = {:.2f}，右轮 = {:.2f}".format(
+            gyro_error, correction, left_speed, right_speed))
         
         left_motor.run(left_speed)
         right_motor.run(right_speed)
@@ -396,6 +410,7 @@ def handle_collision_recovery_intelligent():
     Returns:
         True after performing the recovery motion.
     """
+    print("[handle_collision_recovery_intelligent] 触发碰撞恢复")
     # 停车
     left_motor.stop(Stop.BRAKE)
     right_motor.stop(Stop.BRAKE)
@@ -410,6 +425,7 @@ def handle_collision_recovery_intelligent():
     turn_in_place_simple(90, speed=TURN_SPEED)
     wait(120)
 
+    print("[handle_collision_recovery_intelligent] 恢复结束：已后退 {} mm 并右转 90°".format(BACKUP_MM))
     return True
 
 # 这个方法是根据机器人与墙的相对位置来判断应该采取哪种恢复策略, 也就是恢复策略的判断依据
@@ -427,6 +443,7 @@ def check_pose_intelligent():
     """
     global last_valid_wall_distance
     update_odometry()  # 中文：先更新里程计，确保机器人位置信息是最新的
+    print("[check_pose_intelligent] 开始深度姿态检查")
     
     # 中文：第一步，先检测碰撞传感器（左右两个按钮），优先级最高
     left_pressed = touch_left.pressed()
@@ -434,26 +451,28 @@ def check_pose_intelligent():
     
     if left_pressed or right_pressed:
         # 中文：只要有一个碰撞传感器被触发，说明发生碰撞，立即返回需要调整类型为“collision”
+        print("[check_pose_intelligent] 碰撞传感器触发：左 = {}，右 = {}".format(left_pressed, right_pressed))
         return (True, 'collision', None)
     
     # 中文：第二步，读取多次超声波测距，取平均值，过滤噪音
     distances = []
     for i in range(7):
-        try:
-            dist = ultrasonic.distance()
-            if dist > 0 and dist <= 2000:
-                distances.append(dist)   # 中文：只收集有效（大于0，小于2000mm）的数据
-        except:
+        dist = ultrasonic.distance()
+            #if dist > 0 and dist <= 2000:
+        distances.append(dist)   # 中文：只收集有效（大于0，小于2000mm）的数据
+        #except:
             # 中文：如果测距异常（如传感器抖动），跳过本次
-            pass
+            #pass
         wait(10)  # 中文：每次采集间间隔10ms
     
     if len(distances) == 0:
         # 中文：连续多次都无法读取有效距离，极有可能在拐角或者传感器异常
+        print("[check_pose_intelligent] 超声波无有效读数，判定拐角")
         return (True, 'corner_detected', last_valid_wall_distance)
     
     avg_distance = sum(distances) / len(distances)  # 中文：有效测距的均值
     last_valid_wall_distance = avg_distance
+    print("[check_pose_intelligent] 平均墙距 = {:.1f} mm".format(avg_distance))
     
     # 中文：第三步，检查距离超范围（比如无穷大或者小于0），属于拐角或墙体尽头
     if avg_distance > 2000 or avg_distance < 0:
@@ -461,8 +480,12 @@ def check_pose_intelligent():
     
     # 中文：第四步，判断是否太近（距离小于目标距离-50mm）、太远（大于最大设定距离）
     if avg_distance < TARGET_WALL_DISTANCE_MM - 50:  # 中文：距离目标墙小于15厘米，太近
+        print("[check_pose_intelligent] 判定过近：目标 = {} mm，当前 = {:.1f} mm".format(
+            TARGET_WALL_DISTANCE_MM, avg_distance))
         return (True, 'too_close', avg_distance)
     elif avg_distance > MAX_WALL_DISTANCE_MM:        # 中文：距离目标墙大于28厘米，太远
+        print("[check_pose_intelligent] 判定过远：上限 = {} mm，当前 = {:.1f} mm".format(
+            MAX_WALL_DISTANCE_MM, avg_distance))
         return (True, 'too_far', avg_distance)
     
     # 中文：第五步，主动前探——机器人向前探测30mm，再判断距离变化，用于辅助检测拐角
@@ -534,24 +557,30 @@ def check_pose_and_adjust():
     """
     global last_valid_wall_distance
     update_odometry()
+    print("[check_pose_and_adjust] 开始快速姿态检查")
     
     left_pressed = touch_left.pressed()
     right_pressed = touch_right.pressed()
     
     if left_pressed or right_pressed:
+        print("[check_pose_and_adjust] 碰撞：左 = {}，右 = {}".format(left_pressed, right_pressed))
         return (True, 'collision', None)
     
     try:
         distance = ultrasonic.distance()
         if distance <= 0 or distance > 2000:
+            print("[check_pose_and_adjust] 快速检查：距离无效 {}".format(distance))
             return (False, None, None)
     except:
+        print("[check_pose_and_adjust] 快速检查：超声波异常")
         return (False, None, None)
     
     last_valid_wall_distance = distance
     if distance < TARGET_WALL_DISTANCE_MM - 50:
+        print("[check_pose_and_adjust] 判定过近：{} mm".format(distance))
         return (True, 'too_close', distance)
     
+    print("[check_pose_and_adjust] 姿态正常：{} mm".format(distance))
     return (False, None, distance)
 
 
@@ -561,10 +590,13 @@ def apply_wall_adjustment(adjustment_type, measured_distance=None):
     返回True表示确实执行了调整。
     """
     if adjustment_type == 'collision':
+        print("[apply_wall_adjustment] 执行碰撞恢复")
         handle_collision_recovery_intelligent()
         return True
     
     if adjustment_type == 'too_close':
+        if measured_distance is not None:
+            print("[apply_wall_adjustment] 离墙过近，测距 = {:.1f} mm".format(measured_distance))
         drive_straight_pid(-80, speed=DRIVE_SPEED * 0.6)
         wait(200)
         turn_in_place_simple(25, speed=TURN_SPEED * 0.6)
@@ -572,6 +604,8 @@ def apply_wall_adjustment(adjustment_type, measured_distance=None):
         return True
     
     if adjustment_type == 'too_far':
+        if measured_distance is not None:
+            print("[apply_wall_adjustment] 离墙过远，测距 = {:.1f} mm".format(measured_distance))
         turn_in_place_simple(-20, speed=TURN_SPEED * 0.7)
         wait(200)
         drive_straight_pid(50, speed=DRIVE_SPEED * 0.6)
@@ -580,6 +614,7 @@ def apply_wall_adjustment(adjustment_type, measured_distance=None):
     
     global last_valid_wall_distance
     if adjustment_type == 'corner_detected':
+        print("[apply_wall_adjustment] 检测拐角，开始处理")
         left_pressed = touch_left.pressed()
         right_pressed = touch_right.pressed()
         effective_distance = measured_distance if measured_distance is not None else last_valid_wall_distance
@@ -627,14 +662,19 @@ def assess_and_correct_pose(run_deep_check=True):
         (did_adjust, adjustment_reason, measured_distance)
     """
     quick_needs, quick_reason, quick_distance = check_pose_and_adjust()
+    print("[assess_and_correct_pose] 快速检查结果：needs = {}，reason = {}，distance = {}".format(
+        quick_needs, quick_reason, quick_distance))
     if quick_needs:
         apply_wall_adjustment(quick_reason, quick_distance)
         return (True, quick_reason, quick_distance)
     
     if not run_deep_check:
+        print("[assess_and_correct_pose] 跳过深度检查")
         return (False, None, quick_distance)
     
     needs_adjust, adjustment_type, check_distance = check_pose_intelligent()
+    print("[assess_and_correct_pose] 深度检查结果：needs = {}，reason = {}，distance = {}".format(
+        needs_adjust, adjustment_type, check_distance))
     if needs_adjust:
         apply_wall_adjustment(adjustment_type, check_distance)
         return (True, adjustment_type, check_distance)
@@ -648,11 +688,15 @@ def prepare_wall_following(max_attempts=3):
     """
     attempts = 0
     while attempts < max_attempts:
+        print("[prepare_wall_following] 第 {} 次姿态检查".format(attempts + 1))
         adjusted, reason, _ = assess_and_correct_pose(run_deep_check=(attempts == 0))
         if not adjusted:
+            print("[prepare_wall_following] 姿态稳定，结束预检")
             return
+        print("[prepare_wall_following] 已执行调整：{}".format(reason))
         attempts += 1
         wait(200)
+    print("[prepare_wall_following] 达到最大尝试次数")
 
 # 沿着墙走，直到接近hit point, 核心的算法部分
 
@@ -688,6 +732,8 @@ def follow_wall_until_hit_point(hit_point_x, hit_point_y, wall_start_x=None, wal
     last_distance = target_distance_mm
     ALPHA = 0.5  # 滤波参数，用于距离平滑
 
+    print("[follow_wall_until_hit_point] 开始沿墙：目标墙距 = {} mm，速度 = {}".format(
+        target_distance_mm, speed))
     # 清算残余位移，重置并同步编码器
     update_odometry()
     reset_and_sync_encoders()
@@ -705,6 +751,7 @@ def follow_wall_until_hit_point(hit_point_x, hit_point_y, wall_start_x=None, wal
         target_rotation = (STEP_DISTANCE_MM / WHEEL_CIRCUMFERENCE_MM) * 360
 
         # 读取超声波测距，做平滑处理（防止噪声带来的大跳变）
+        raw_distance = None
         try:
             raw_distance = ultrasonic.distance()
             if raw_distance <= 0 or raw_distance > 2000:
@@ -718,6 +765,9 @@ def follow_wall_until_hit_point(hit_point_x, hit_point_y, wall_start_x=None, wal
             current_distance = last_distance
 
         last_distance = current_distance  # 存档本次测距
+        raw_display = "None" if raw_distance is None else int(raw_distance)
+        print("[follow_wall_until_hit_point] 步 {}：原始距离 = {}，滤波后 = {:.1f}，误差 = {:.1f}".format(
+            step_count, raw_display, current_distance, target_distance_mm - current_distance))
 
         # 计算距离误差，准备PID
         error = target_distance_mm - current_distance
@@ -734,6 +784,8 @@ def follow_wall_until_hit_point(hit_point_x, hit_point_y, wall_start_x=None, wal
         correction = p + i + d
         # 再限制修正量，放缓反应速度
         correction = max(-60, min(60, correction))
+        print("[follow_wall_until_hit_point] PID：P = {:.2f}，I = {:.2f}，D = {:.2f}，修正 = {:.2f}".format(
+            p, i, d, correction))
 
         # 按照PID调整之后的左右轮速度
         # 如果太靠近墙壁（error>0，correction>0），左电机快，机器人右转，远离墙
@@ -746,6 +798,7 @@ def follow_wall_until_hit_point(hit_point_x, hit_point_y, wall_start_x=None, wal
         max_speed = speed * 1.4
         left_speed = max(min_speed, min(max_speed, left_speed))
         right_speed = max(min_speed, min(max_speed, right_speed))
+        print("[follow_wall_until_hit_point] 速度限制：左 = {:.2f}，右 = {:.2f}".format(left_speed, right_speed))
 
         # 每走一步都清零电机转角，记录起始陀螺仪角度
         # 注意：这里不需要先 update_odometry()，因为我们只是为了测量本步距离
@@ -799,6 +852,7 @@ def follow_wall_until_hit_point(hit_point_x, hit_point_y, wall_start_x=None, wal
         run_deep_check = (step_count == 1) or (step_count % STEP_CHECK_INTERVAL == 0)
         adjusted, adjustment_reason, check_distance = assess_and_correct_pose(run_deep_check=run_deep_check)
         if adjusted:
+            print("[follow_wall_until_hit_point] 姿态调整：{}".format(adjustment_reason))
             integral = 0
             last_error = 0
             last_distance = target_distance_mm
@@ -810,6 +864,7 @@ def follow_wall_until_hit_point(hit_point_x, hit_point_y, wall_start_x=None, wal
 
         # ========== 步骤3：判断是否回到起点（开始沿墙的位置） ==========
         dist_to_target = distance_to_point(target_x, target_y)
+        print("Hit point distance:", int(dist_to_target), "mm")
 
         # 初次记录离起点的距离，用于判断是否真的绕了一圈
         if initial_distance_to_hit is None:
@@ -845,7 +900,7 @@ def follow_wall_until_hit_point(hit_point_x, hit_point_y, wall_start_x=None, wal
                 left_motor.stop(Stop.BRAKE)
                 right_motor.stop(Stop.BRAKE)
                 update_odometry()
-                
+                print("[follow_wall_until_hit_point] 已完成一圈，准备执行离开动作")
                 return  # ← 直接结束函数
 
         # ========== 步骤4：每隔5步更新界面，显示进展和传感器状态 ==========
@@ -879,16 +934,20 @@ def main():
         # 此时坐标为 (0, 0)，这是真正的物理起始位置
         start_point_x = robot_x  # 0.0
         start_point_y = robot_y  # 0.0
+        print("[main] 起点记录：({:.1f}, {:.1f})".format(start_point_x, start_point_y))
         
         # ========== Phase 1: Drive Forward Until Obstacle Detected ==========
+        print("[main] 阶段1：前进寻找障碍物")
         
         # 直行直到碰撞，获取起点→碰撞点的距离
         dist_to_collision = drive_until_obstacle_detected(speed=DRIVE_SPEED)
         if dist_to_collision is None:
             return
+        print("[main] 碰撞距离：{:.1f} mm".format(dist_to_collision))
         wait(500)
         
         # ========== Phase 2: Record Hit Point and Back Up ==========
+        print("[main] 阶段2：回退至 Hit Point")
         
         # 后退到 Hit Point（距离障碍物前墙 20cm 的位置）
         # 根据规格："The point directly in front of your robot and 20 cm away 
@@ -905,13 +964,17 @@ def main():
         hit_point_x = robot_x
         hit_point_y = robot_y
         hit_point_heading = robot_heading
+        print("[main] Hit Point 设置：坐标 = ({:.1f}, {:.1f})，航向 = {:.1f}°".format(
+            hit_point_x, hit_point_y, hit_point_heading))
         
         # 记录"离开时要直走的距离"（起点→Hit Point）
         # 这是从起点到碰撞点的距离减去后退的200mm
         exit_straight_distance = max(0, dist_to_collision - BACKUP_DISTANCE_MM)
+        print("[main] 记录离开直行距离：{:.1f} mm".format(exit_straight_distance))
 
         
         # ========== Phase 3: Turn Right 90° ==========
+        print("[main] 阶段3：原地右转 90°")
 
         
         #turn_in_place_pid(90, speed=TURN_SPEED)  # Positive = clockwise (right)
@@ -929,13 +992,16 @@ def main():
         
         # 更新 hit_point_heading 为转向后的航向角
         hit_point_heading = robot_heading
+        print("[main] 右转完成：当前航向 = {:.1f}°".format(hit_point_heading))
         
         prepare_wall_following()
+        print("[main] 姿态预检完成，准备沿墙")
         
         ev3.speaker.beep()
         wait(500)
         
         # ========== Phase 4: Wall Following Until Back Near Hit Point ==========
+        print("[main] 阶段4：沿墙跟随返回 Hit Point")
         
         # 沿墙直到回到 Hit Point，并在回到时执行离开动作
         # 离开动作：停车 → 右转90° → 直走 exit_straight_distance → 停止
