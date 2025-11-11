@@ -118,7 +118,7 @@ def update_odometry():
     ds = ddeg * MM_PER_DEG  # 单位：mm
 
     # --- 3️⃣ 当前与上次陀螺仪角度（°）---
-    curr_heading_deg = GYRO.angle() + gyro_offset
+    curr_heading_deg = - (GYRO.angle() + gyro_offset)
     dtheta_deg = curr_heading_deg - _last_heading_deg
 
     # 初始化时防止第一次跳变
