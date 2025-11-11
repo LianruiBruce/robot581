@@ -322,8 +322,9 @@ def main():
         d_s = (1 - EMA_ALPHA) * d_s + EMA_ALPHA * d_raw
 
         # (B2) Sharp LEFT-corner detect (~20 ms derivative timing)
-        e_prov  = d_s - TARGET_DIST_MM
-        de_prov = (d_s - d_prev) / 0.02
+        d_filtered = (1 - EMA_ALPHA) * d_prev + EMA_ALPHA * (ultrasonic.distance() or d_prev)
+        e_prov = d_filtered - TARGET_DIST_MM
+        de_prov = (d_filtered - d_prev) / 0.02
 
         if (e_prov > LEFT_CORNER_GAP) and (de_prov > LEFT_CORNER_DE_DOT):
             curr = gyro_angle_rel(base_heading)
@@ -338,6 +339,7 @@ def main():
             d_raw = ultrasonic.distance() or d_s
             wait(20)
             last_time_ms = timer.time()
+            print("LEFT-corner? e_prov=%.1f de_prov=%.1f d_s=%.1f" % (e_prov, de_prov, d_s))
             continue
 
         # (C) Wall PD + gyro damping (~20 ms diff)
