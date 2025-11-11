@@ -144,7 +144,8 @@ def update_odometry():
         # 弧形路径积分（精确版）
         R = ds / dtheta
         dx = R * (sin(th_mid + dtheta / 2) - sin(th_mid - dtheta / 2))
-        dy = -R * (cos(th_mid + dtheta / 2) - cos(th_mid - dtheta / 2))
+        dy = R * (cos(th_mid + dtheta / 2) - cos(th_mid - dtheta / 2))
+
 
     # --- 6️⃣ 更新全局位置 ---
     x += dx
