@@ -324,7 +324,7 @@ def main():
         d_s = (1 - EMA_ALPHA) * d_s + EMA_ALPHA * d_raw
 
         # (B2) Sharp LEFT-corner detect (~20 ms derivative timing)
-        d_filtered = (1 - EMA_ALPHA) * d_prev + EMA_ALPHA * (ultrasonic.distance() or d_prev)
+        d_filtered = (1 - EMA_ALPHA) * d_prev + EMA_ALPHA * (ULTRA.distance() or d_prev)
         e_prov = d_filtered - TARGET_DIST_MM
         de_prov = (d_filtered - d_prev) / 0.02
 
