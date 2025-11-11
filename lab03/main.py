@@ -89,6 +89,7 @@ start_x, start_y = 0.0, 0.0 # 记录真正的出发点（按键后）
 wall_follow_start_x = 0.0   # 记录开始绕墙的点（右转90度后）
 wall_follow_start_y = 0.0
 approach_contact_mm = 0.0   # 记录"出发→碰撞"的直线距离（用于最终返回）
+_last_heading_deg = GYRO.angle() + gyro_offset
 
 def reset_encoder_baseline():
     """重置编码器基线：把当前位置当作(0,0)，同步编码器基线"""
@@ -103,44 +104,55 @@ def sync_encoders_after_turn():
 
 def update_odometry():
     """
-    正确积分方式的里程计更新。
-    修复问题：防止绕圈后坐标只增不减。
+    修正版：基于相对运动积分的里程计更新
+    解决问题：绕圈时距离只增加、不回原点
     """
     global x, y, heading_deg, _last_deg_avg, _last_heading_deg
 
-    # 1️⃣ 当前轮角平均
+    # --- 1️⃣ 当前编码器平均角度 ---
     deg_avg = 0.5 * (LEFT.angle() + RIGHT.angle())
     ddeg = deg_avg - _last_deg_avg
     _last_deg_avg = deg_avg
 
-    # 2️⃣ 平均前进距离（mm）
-    ds = ddeg * MM_PER_DEG
+    # --- 2️⃣ 平均前进距离（mm）---
+    ds = ddeg * MM_PER_DEG  # 单位：mm
 
-    # 3️⃣ 当前和上次陀螺仪角度（度）
-    curr_heading = GYRO.angle() + gyro_offset
-    dtheta_deg = curr_heading - _last_heading_deg
-    _last_heading_deg = curr_heading
+    # --- 3️⃣ 当前与上次陀螺仪角度（°）---
+    curr_heading_deg = GYRO.angle() + gyro_offset
+    dtheta_deg = curr_heading_deg - _last_heading_deg
 
-    # 4️⃣ 转弧度
-    dtheta = math.radians(dtheta_deg)
-    th_mid = math.radians(heading_deg + dtheta_deg / 2.0)
+    # 初始化时防止第一次跳变
+    if '_last_heading_deg' not in globals():
+        _last_heading_deg = curr_heading_deg
+        dtheta_deg = 0
 
-    # 5️⃣ 通过运动学积分更新坐标
+    # 更新记录
+    _last_heading_deg = curr_heading_deg
+
+    # --- 4️⃣ 转弧度 ---
+    dtheta = radians(dtheta_deg)
+
+    # 使用“上次角 + 一半旋转角”近似中间朝向
+    th_mid = radians(heading_deg + dtheta_deg / 2.0)
+
+    # --- 5️⃣ 微分运动学积分 ---
     if abs(dtheta) < 1e-6:
         # 小角近似直线
-        dx = ds * math.cos(th_mid)
-        dy = ds * math.sin(th_mid)
+        dx = ds * cos(th_mid)
+        dy = ds * sin(th_mid)
     else:
-        # 弧形积分法（更精确）
+        # 弧形路径积分（精确版）
         R = ds / dtheta
-        dx = R * (math.sin(th_mid + dtheta/2) - math.sin(th_mid - dtheta/2))
-        dy = -R * (math.cos(th_mid + dtheta/2) - math.cos(th_mid - dtheta/2))
+        dx = R * (sin(th_mid + dtheta / 2) - sin(th_mid - dtheta / 2))
+        dy = -R * (cos(th_mid + dtheta / 2) - cos(th_mid - dtheta / 2))
 
+    # --- 6️⃣ 更新全局位置 ---
     x += dx
     y += dy
-    heading_deg = curr_heading
+    heading_deg = curr_heading_deg
 
     return ds
+
 
 def calc_distance(x1, y1, x2, y2):
     """计算两点之间的欧几里得距离(mm)"""
