@@ -102,16 +102,44 @@ def sync_encoders_after_turn():
     _last_deg_avg = 0.5 * (LEFT.angle() + RIGHT.angle())
 
 def update_odometry():
-    """更新里程计：增量式里程计，用平均轮角度换算平移，航向来自陀螺(含offset)"""
-    global x, y, heading_deg, _last_deg_avg
+    """
+    正确积分方式的里程计更新。
+    修复问题：防止绕圈后坐标只增不减。
+    """
+    global x, y, heading_deg, _last_deg_avg, _last_heading_deg
+
+    # 1️⃣ 当前轮角平均
     deg_avg = 0.5 * (LEFT.angle() + RIGHT.angle())
     ddeg = deg_avg - _last_deg_avg
     _last_deg_avg = deg_avg
+
+    # 2️⃣ 平均前进距离（mm）
     ds = ddeg * MM_PER_DEG
-    heading_deg = GYRO.angle() + gyro_offset
-    th = radians(heading_deg)
-    x += ds * cos(th)
-    y += ds * sin(th)
+
+    # 3️⃣ 当前和上次陀螺仪角度（度）
+    curr_heading = GYRO.angle() + gyro_offset
+    dtheta_deg = curr_heading - _last_heading_deg
+    _last_heading_deg = curr_heading
+
+    # 4️⃣ 转弧度
+    dtheta = math.radians(dtheta_deg)
+    th_mid = math.radians(heading_deg + dtheta_deg / 2.0)
+
+    # 5️⃣ 通过运动学积分更新坐标
+    if abs(dtheta) < 1e-6:
+        # 小角近似直线
+        dx = ds * math.cos(th_mid)
+        dy = ds * math.sin(th_mid)
+    else:
+        # 弧形积分法（更精确）
+        R = ds / dtheta
+        dx = R * (math.sin(th_mid + dtheta/2) - math.sin(th_mid - dtheta/2))
+        dy = -R * (math.cos(th_mid + dtheta/2) - math.cos(th_mid - dtheta/2))
+
+    x += dx
+    y += dy
+    heading_deg = curr_heading
+
     return ds
 
 def calc_distance(x1, y1, x2, y2):
