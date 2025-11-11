@@ -1,1043 +1,405 @@
 #!/usr/bin/env pybricks-micropython
-# Team Members: Lianrui Geng && Xinyi Guo
-# Lab 03  BOUNDARY TRACING AND RETURN TO START
+# Refactor of Yunqi Li & Chenrui Li wall-follow algorithm
+# Ports remapped to:
+#   LEFT_MOTOR_PORT = Port.B
+#   RIGHT_MOTOR_PORT = Port.C
+#   TOUCH_LEFT_PORT = Port.S1
+#   TOUCH_RIGHT_PORT = Port.S3
+#   GYRO_PORT = Port.S2
+#   ULTRA_PORT = Port.S4  (ultrasonic facing LEFT)
 #
-# This program implements Lab 3: Boundary Tracing and Return to Start.
-# 
-# Task Sequence:
-# 1. Start at starting point (2.0 m, 0.5 m)
-# 2. Drive straight forward until obstacle is detected (within 30cm or contact)
-# 3. Beep to indicate obstacle found
-# 4. Record hit point (position and heading) - 20cm from obstacle front wall
-# 5. Back away from obstacle
-# 6. Turn right 90 degrees using gyro
-# 7. Left-side wall following with PID control, keeping measuring point within 30 cm
-# 8. Continue tracing until back near hit point
-# 9. Turn away from obstacle and return to starting point using odometry
+# Behavior preserved: initial approach → backoff → right 90° → wall-follow (left) → close loop → finish
+# Added: global (x,y) mapping to lab's world frame with HIT_POINT at (2000, 500) for exit condition.
 
-import math
 from pybricks.hubs import EV3Brick
-from pybricks.ev3devices import Motor, UltrasonicSensor, TouchSensor, GyroSensor
-from pybricks.parameters import Port, Stop, Button
+from pybricks.ev3devices import Motor, GyroSensor, TouchSensor, UltrasonicSensor
+from pybricks.parameters import Port, Direction, Stop, Button
 from pybricks.tools import wait, StopWatch
+from math import pi, sqrt, cos, sin, radians
 
-# ============================ CONFIGURATION =============================
-
-# Hardware Ports
-LEFT_MOTOR_PORT = Port.B
+# ============================ HARDWARE PORTS =============================
+LEFT_MOTOR_PORT  = Port.B
 RIGHT_MOTOR_PORT = Port.C
-TOUCH_LEFT_PORT = Port.S1     # Left bumper touch sensor
-TOUCH_RIGHT_PORT = Port.S3   # Right bumper touch sensor
-GYRO_PORT = Port.S2           # Gyroscope for angle measurement
-ULTRA_PORT = Port.S4         # Ultrasonic sensor facing LEFT side
+TOUCH_LEFT_PORT  = Port.S1
+TOUCH_RIGHT_PORT = Port.S3
+GYRO_PORT        = Port.S2
+ULTRA_PORT       = Port.S4
 
-# Robot Geometry
-WHEEL_DIAMETER_MM = 56.0      # Diameter of drive wheels in millimeters
-AXLE_TRACK_MM = 125.0         # Distance between left and right wheels
-WHEEL_CIRCUMFERENCE_MM = math.pi * WHEEL_DIAMETER_MM
-
-# Movement Parameters
-DRIVE_SPEED = 200             # Motor speed in degrees per second for forward motion
-TURN_SPEED = 80               # Motor speed in degrees per second for turning
-
-# Lab 3 Specific Parameters
-BACKUP_DISTANCE_MM = 150      # Distance to back away from obstacle (20 cm)
-TARGET_WALL_DISTANCE_MM = 170 # Target distance from wall during following (20 cm)
-MAX_WALL_DISTANCE_MM = 240    # Maximum allowed distance (28 cm requirement)
-HIT_POINT_TOLERANCE_MM = 120  # How close to be considered "back at hit point"
-OBSTACLE_DETECTION_DISTANCE_MM = 300  # Distance to detect obstacle (30 cm)
-CORNER_DISTANCE_TOLERANCE_MM = 80     # 将最后一次正常距离视为拐角的容差
-
-# Hit Point Definition (from lab requirements)
-# NOTE: Hit point is defined as the position 20cm away from obstacle after collision.
-# We set this position as the coordinate reference point (2000, 500).
-HIT_POINT_X_MM = 2000.0     # 2.0 m - 定义Hit Point的X坐标
-HIT_POINT_Y_MM = 500.0      # 0.5 m - 定义Hit Point的Y坐标
-
-# Wall Following PID Parameters (reduced to prevent overreaction)
-WALL_KP = 0.55                 # Reduced proportional gain to prevent overreaction
-WALL_KI = 0.003               # Reduced integral gain
-WALL_KD = 0.25                 # Reduced derivative gain
-
-# Dead Reckoning Parameters
-STEP_DISTANCE_MM = 70         # Distance to move in each step (dead reckoning)
-STEP_CHECK_INTERVAL = 7      # Check sensors every N steps
-
-# Straight Drive PID Parameters
-GYRO_KP = 2.0                 # Gyro correction PID gains
-GYRO_KI = 0
-GYRO_KD = 1
-
-# Turn Control Parameters
-COARSE_KP = 2.5               # Coarse turn proportional gain
-FINE_KP = 5.0                 # Fine turn PID gains
-FINE_KI = 0.08
-FINE_KD = 3.0
-
-# ============================ INITIALIZATION =============================
-
+# ============================ HARDWARE ==================================
 ev3 = EV3Brick()
-left_motor = Motor(LEFT_MOTOR_PORT)
-right_motor = Motor(RIGHT_MOTOR_PORT)
-touch_left = TouchSensor(TOUCH_LEFT_PORT)
+left_motor  = Motor(LEFT_MOTOR_PORT,  positive_direction=Direction.CLOCKWISE)
+right_motor = Motor(RIGHT_MOTOR_PORT, positive_direction=Direction.CLOCKWISE)
+gyro        = GyroSensor(GYRO_PORT)
+touch_left  = TouchSensor(TOUCH_LEFT_PORT)
 touch_right = TouchSensor(TOUCH_RIGHT_PORT)
-gyro = GyroSensor(GYRO_PORT)
-ultrasonic = UltrasonicSensor(ULTRA_PORT)
+ultrasonic  = UltrasonicSensor(ULTRA_PORT)
 
-# Reset gyro sensor
-gyro.reset_angle(0)
-wait(10)
+def bump_pressed():
+    """Return True if either front bumper is pressed."""
+    return touch_left.pressed() or touch_right.pressed()
 
-# Odometry state - track robot position
-robot_x = 0.0                 # X position in mm (起始点坐标，从原点开始)
-robot_y = 0.0                 # Y position in mm (起始点坐标，从原点开始)
-robot_heading = 0.0           # Heading in degrees (0 = positive X direction)
-gyro_offset = 0.0             # Offset to handle gyro resets while maintaining global heading
-last_left_angle = 0            # Last left motor encoder reading
-last_right_angle = 0           # Last right motor encoder reading
-last_valid_wall_distance = TARGET_WALL_DISTANCE_MM  # 记录最近一次可靠的墙距读数
+# ============================ GEOMETRY / UNITS ===========================
+WHEEL_DIAM_MM  = 56
+TRACK_WIDTH_MM = 118
+MM_PER_DEG     = (pi * WHEEL_DIAM_MM) / 360.0
 
-# Starting position (星星位置) - 记录真正的物理起始点
-start_point_x = 0.0           # 起始点 X 坐标 (物理起始位置)
-start_point_y = 0.0           # 起始点 Y 坐标 (物理起始位置)
+# ============================ CONTROL GAINS ==============================
+Kp_h, Kd_h = 4.0, 0.04        # heading PD (gyro angle+rate)
+Kp_d, Kd_d = 0.007, 0.002     # wall PD (distance and d/dt)
+EMA_ALPHA  = 0.25
+MAX_D_STEP = 30
+MAX_DIFF   = 250
 
-# Reset motor encoders and sync with odometry
-left_motor.reset_angle(0)
-right_motor.reset_angle(0)
-last_left_angle = 0  # 同步里程计变量
-last_right_angle = 0  # 同步里程计变量
+# ============================ SPEEDS ====================================
+SPEED_MM_S        = 220       # initial approach speed (mm/s)
+FOLLOW_SPEED_MM_S = 160       # wall-follow speed (mm/s)
+MAX_SPEED         = 400       # deg/s caps for Motor.run
+MIN_SPEED         = 120
+MAX_SPEED_FOLLOW  = 340
+MIN_SPEED_FOLLOW  = 90
 
-# ============================ HELPER FUNCTIONS =============================
+# ============================ MISSION PARAMS =============================
+TARGET_DIST_MM   = 135        # desired left clearance
+PERIM_MIN_MM     = 1500       # min perimeter before loop-close check
+HIT_RADIUS_MM    = 100        # distance-to-HIT in global frame to stop following
+HIT_BACKOFF_MM   = 140.0      # after first bump to set hitpoint
+BUMP_BACKOFF_MM  = 100.0
+BUMP_RIGHT_DEG   = 45.0
+BUMP_SURGE_MM    = 120.0
 
-def reset_and_sync_encoders():
-    """
-    重置电机编码器并同步里程计变量。
-    
-    重要：在任何 reset_angle(0) 之后，必须同步 last_left_angle 和 last_right_angle，
-    避免下次 update_odometry() 时计算出错误的位移（巨大的反向跳变）。
-    
-    建议：在调用此函数前先调用 update_odometry() 清算残余位移。
-    """
-    global last_left_angle, last_right_angle
+# Corner recovery / sensor artifacts
+CORNER_PEEK_RIGHT_DEG = 30.0
+CORNER_SURGE_MM       = 120.0
+ULTRA_TAPE_GLITCH     = 337
+ULTRA_MAX_RANGE       = 2500
+
+# Sharp LEFT-corner (~120°) handling
+LEFT_CORNER_GAP      = 90.0
+LEFT_CORNER_DE_DOT   = 700.0
+CORNER_PEEK_LEFT_DEG = 60.0
+CORNER_SURGE_LEFT_MM = 160.0
+
+# ============================ LAB WORLD FRAME (NEW) ======================
+# Define the lab's global coordinates where the hit point is known/required.
+HIT_POINT_X_MM = 2000.0
+HIT_POINT_Y_MM = 500.0
+
+# Local odom (x,y) origin is set at hit point after backoff+right turn.
+# We'll map local -> global by a constant offset set at that moment.
+global_x = 0.0
+global_y = 0.0
+_gx_offset = 0.0   # world_x = _gx_offset + x
+_gy_offset = 0.0   # world_y = _gy_offset + y
+
+def set_global_origin_at_current_local_hit_point():
+    """Map current local odom origin (x=0,y=0) to lab's HIT_POINT (2000, 500)."""
+    global _gx_offset, _gy_offset
+    _gx_offset = HIT_POINT_X_MM
+    _gy_offset = HIT_POINT_Y_MM
+    update_global_xy()  # sync once
+
+def update_global_xy():
+    """Recompute global_x/global_y from local odom (x,y)."""
+    global global_x, global_y
+    global_x = _gx_offset + x
+    global_y = _gy_offset + y
+
+def dist_global_to_hit():
+    dx = global_x - HIT_POINT_X_MM
+    dy = global_y - HIT_POINT_Y_MM
+    return sqrt(dx*dx + dy*dy)
+
+# ============================ HELPERS ====================================
+def mps_to_dps(v_mm_s):
+    """Convert linear wheel speed (mm/s) to motor deg/s."""
+    return (v_mm_s / (pi * WHEEL_DIAM_MM)) * 360.0
+
+def set_wheels(vL, vR, vmax, vmin):
+    """Apply speed with clamp and deadband floor."""
+    vL = max(-vmax, min(vmax, vL))
+    vR = max(-vmax, min(vmax, vR))
+    if 0 < abs(vL) < vmin: vL = vmin if vL > 0 else -vmin
+    if 0 < abs(vR) < vmin: vR = vmin if vR > 0 else -vmin
+    left_motor.run(vL)
+    right_motor.run(vR)
+
+def gyro_zero():
+    return gyro.angle()
+
+def gyro_angle_rel(base):
+    """Current yaw (deg) relative to base reading."""
+    return gyro.angle() - base
+
+def turn_to_heading_with_base(target_deg, base, tol=2.0, kp=3.0, max_sp=200):
+    """In-place turn to absolute heading (relative to `base`)."""
+    while True:
+        e = target_deg - gyro_angle_rel(base)
+        if abs(e) < tol:
+            break
+        turn = max(-max_sp, min(max_sp, kp * e))
+        left_motor.run( turn)
+        right_motor.run(-turn)
+        wait(10)  # keep inside loop
+    left_motor.stop(Stop.HOLD)
+    right_motor.stop(Stop.HOLD)
+
+def drive_straight_heading_with_base(target_deg, base, speed_mm_s, stop_cond_fn, max_time_ms=300000):
+    """Drive straight using heading PD, stop on `stop_cond_fn()` or timeout."""
+    v_cmd = mps_to_dps(speed_mm_s)
+    timer = StopWatch()
+    while timer.time() < max_time_ms:
+        theta = gyro_angle_rel(base) - target_deg
+        omega = gyro.speed()
+        head_cmd = Kp_h * (-theta) - Kd_h * omega
+        headroom = MAX_SPEED - v_cmd
+        head_cmd = max(-headroom, min(headroom, head_cmd))
+        vL = v_cmd - head_cmd
+        vR = v_cmd + head_cmd
+        set_wheels(vL, vR, MAX_SPEED, MIN_SPEED)
+        if stop_cond_fn():
+            break
+        wait(20)
+    left_motor.stop(Stop.BRAKE)
+    right_motor.stop(Stop.BRAKE)
+
+# ============================ ODOMETRY ===================================
+x, y = 0.0, 0.0                 # origin set at hit point after backoff+right turn
+_last_deg_avg = 0.0
+base_heading = 0                # gyro baseline at odom_reset
+
+def odom_reset():
+    """Zero position; set gyro baseline."""
+    global x, y, _last_deg_avg, base_heading
+    x = 0.0
+    y = 0.0
     left_motor.reset_angle(0)
     right_motor.reset_angle(0)
-    last_left_angle = 0
-    last_right_angle = 0
+    _last_deg_avg = 0.0
+    base_heading = gyro_zero()
+    update_global_xy()  # keep global in sync
 
-# 这个方法是将角度归一化到-180到180度之间, 也就是角度归一化的函数
-def normalize_angle(angle_deg):
-    """
-    Normalize angle to -180 to 180 degree range.
-    This ensures we always take the shortest path when turning.
-    """
-    angle_deg = angle_deg % 360  # First normalize to 0-360
-    if angle_deg > 180:
-        angle_deg -= 360
-    return angle_deg
+def odom_update():
+    """Integrate translation only; in-place turns give ~0 ds (avg wheel motion)."""
+    global x, y, _last_deg_avg
+    deg_avg = 0.5 * (left_motor.angle() + right_motor.angle())
+    ddeg = deg_avg - _last_deg_avg
+    _last_deg_avg = deg_avg
+    ds = ddeg * MM_PER_DEG
+    th = radians(gyro_angle_rel(base_heading))
+    x += ds * cos(th)
+    y += ds * sin(th)
+    update_global_xy()  # NEW: sync global each update
+    return ds
 
-# 更新机器人位置,这个是计算机器人位置的核心函数
-def update_odometry():
-    """
-    Update robot's position using wheel odometry (differential drive kinematics).
-    Should be called regularly during movement to maintain accurate position tracking.
-    """
-    global robot_x, robot_y, robot_heading, last_left_angle, last_right_angle, gyro_offset
-    
-    # Get current encoder readings
-    left_angle = left_motor.angle()
-    right_angle = right_motor.angle()
-    
-    # Calculate change in encoder readings (in degrees)
-    # 这个是计算左右轮的差值
-    left_delta = left_angle - last_left_angle
-    right_delta = right_angle - last_right_angle
-    
-    # Convert degrees to distance (mm) 
-    left_distance = (left_delta / 360.0) * WHEEL_CIRCUMFERENCE_MM
-    right_distance = (right_delta / 360.0) * WHEEL_CIRCUMFERENCE_MM
-    
-    # Update stored encoder values
-    # 更新左右轮的角速度
-    last_left_angle = left_angle
-    last_right_angle = right_angle
-    
-    # Calculate forward movement (average of both wheels)
-    # 计算前进距离
-    forward_distance = (left_distance + right_distance) / 2.0
-    
-    # Get current heading from gyro and add offset to maintain global heading
-    # 获取当前航向角（陀螺仪读数 + 偏移量 = 全局航向角）
-    robot_heading = gyro.angle() + gyro_offset
-    # 将航向角转换为弧度
-    heading_rad = math.radians(robot_heading)
-    
-    # Update position based on current heading
-    robot_x += forward_distance * math.cos(heading_rad)
-    robot_y += forward_distance * math.sin(heading_rad)
-    
-    return (robot_x, robot_y, robot_heading)
+def odom_freeze_wheels():
+    """Reset odom encoder baseline WITHOUT changing x,y (use after in-place turns)."""
+    global _last_deg_avg
+    _last_deg_avg = 0.5 * (left_motor.angle() + right_motor.angle())
 
+def dist_mm(ax, ay, bx, by):
+    dx, dy = (ax - bx), (ay - by)
+    return sqrt(dx*dx + dy*dy)
 
-# 计算机器人当前位置到目标位置的距离
-def distance_to_point(x, y):
-    """Calculate Euclidean distance from current position to target point."""
-    dx = robot_x - x
-    dy = robot_y - y
-    return math.sqrt(dx*dx + dy*dy)
+def turn_to_heading(target_deg, tol=2.0, kp=3.0, max_sp=200):
+    turn_to_heading_with_base(target_deg, base_heading, tol, kp, max_sp)
 
+def drive_straight_heading(target_deg, speed_mm_s, stop_cond_fn, max_time_ms=300000):
+    drive_straight_heading_with_base(target_deg, base_heading, speed_mm_s, stop_cond_fn, max_time_ms)
 
-def drive_straight_pid(distance_mm, speed=DRIVE_SPEED):
-    """
-    Drive straight for a specific distance using gyro PID control.
-    
-    Args:
-        distance_mm: Target distance (positive=forward, negative=backward)
-        speed: Base motor speed in degrees per second
-    """
-    print("[drive_straight_pid] 开始直行：目标距离 = {} mm，速度 = {}".format(distance_mm, speed))
-    target_rotation = (abs(distance_mm) / WHEEL_CIRCUMFERENCE_MM) * 360
-    direction = 1 if distance_mm > 0 else -1
-    
-    # 清算残余位移，然后重置并同步编码器
-    update_odometry()
-    reset_and_sync_encoders()
-    initial_gyro = gyro.angle()
-    correction = 0
-    left_speed = 0
-    right_speed =0
-    
-    gyro_integral = 0
-    gyro_last_error = 0
-    stopwatch = StopWatch()
-    last_time = 0
-        
-    while True:
-        current_time = stopwatch.time()
-        dt = (current_time - last_time) / 1000.0
-        if dt == 0:
-            dt = 0.05
-        last_time = current_time
-        
-        # Update odometry during movement
-        update_odometry()
-        
-        # Check if target distance reached
-        avg_rotation = (abs(left_motor.angle()) + abs(right_motor.angle())) / 2
-        if avg_rotation >= target_rotation:
-            break
-        
-        # Calculate gyro error
-        gyro_error = gyro.angle() - initial_gyro
-        
-        # PID calculation
-        gyro_p = GYRO_KP * gyro_error
-        gyro_integral += gyro_error * dt
-        gyro_integral = max(-30, min(30, gyro_integral))
-        gyro_i = GYRO_KI * gyro_integral
-        gyro_derivative = (gyro_error - gyro_last_error) / dt
-        gyro_d = GYRO_KD * gyro_derivative
-        gyro_last_error = gyro_error
-        
-        # correction = gyro_p + gyro_i + gyro_d
-        correction = gyro_p + gyro_i + gyro_d
+def print_xy():
+    ev3.screen.clear()
+    ev3.screen.print("loc x={:.0f} y={:.0f}".format(x, y))
+    ev3.screen.print("G  X={:.0f} Y={:.0f}".format(global_x, global_y))
 
-        correction = max(-50, min(50, correction))
-        
-        # Apply correction
-        if direction == 1:
-            left_speed = speed - correction
-            right_speed = speed + correction
-        else:
-            left_speed = -(speed + correction)
-            right_speed = -(speed - correction)
-        
-        # max_abs_speed = speed * 1.2
-        # left_speed = max(-max_abs_speed, min(max_abs_speed, left_speed))
-        # right_speed = max(-max_abs_speed, min(max_abs_speed, right_speed))
-        
-        left_motor.run(left_speed)
-        right_motor.run(right_speed)
-        print("[drive_straight_pid] 纠偏：误差 = {:.2f}°，修正 = {:.2f}，左轮 = {:.2f}，右轮 = {:.2f}".format(
-            gyro_error, correction, left_speed, right_speed))
-
-        wait(20)
-        
-    
-    left_motor.stop(Stop.BRAKE)
-    right_motor.stop(Stop.BRAKE)
-    wait(10)
-    
-    # Final odometry update
-    update_odometry()
-    print("[drive_straight_pid] 完成直行：当前坐标 = ({:.1f}, {:.1f})，航向 = {:.1f}°".format(
-        robot_x, robot_y, robot_heading))
-
-# 这个方法是根据陀螺仪角度来控制机器人转向, 也就是转向的控制依据
-def turn_in_place_simple(angle_degrees, speed=TURN_SPEED):
-    """
-    Simple turn-in-place using gyro feedback. No advanced convergence checks.
-    Turns robot by the specified angle (positive=clockwise/right, negative=counterclockwise/left).
-    """
-    print("[turn_in_place_simple] 开始转向：目标角度 = {}°，速度 = {}".format(angle_degrees, speed))
-    initial_gyro = gyro.angle()
-    target_gyro = initial_gyro + angle_degrees
-
-    # Normalize target so the robot takes the shortest path
-    def normalize_angle_simple(deg):
-        while deg > 180:
-            deg -= 360
-        while deg < -180:
-            deg += 360
-        return deg
-
-    Kp = 2.5
-    Ki = 0.02
-    Kd = 0.5
-
-    integral = 0
-    last_error = 0
-
-    while True:
-        current_gyro = gyro.angle()
-        error = normalize_angle_simple(target_gyro - current_gyro)
-        if abs(error) < 2:  # close enough (degrees)
-            break
-
-        # Simple PID
-        p = Kp * error
-        integral += error * 0.02  # dt=20ms ~=0.02s
-        integral = max(-10, min(10, integral))
-        i = Ki * integral
-        d = Kd * (error - last_error) / 0.02
-        last_error = error
-        turn = p + i + d
-        turn = max(-speed, min(speed, turn))
-
-        left_motor.run(turn)
-        right_motor.run(-turn)
-        print("[turn_in_place_simple] 转向中：误差 = {:.2f}°，输出 = {:.2f}".format(error, turn))
-        wait(20)
-
-    left_motor.stop(Stop.BRAKE)
-    right_motor.stop(Stop.BRAKE)
-    wait(100)
-    
-    # 更新里程计，同步编码器读数和航向角
-    update_odometry()
-    print("[turn_in_place_simple] 转向完成：当前航向 = {:.1f}°".format(robot_heading))
-
-## NOTE: An alternative PID-based turn_in_place implementation used for experimentation
-## was previously left here at module scope with the function header commented out.
-## It has been removed to prevent executing control code at import time.
-
-def drive_until_obstacle_detected(speed=DRIVE_SPEED):
-    """
-    Drive forward until obstacle is detected via TOUCH SENSORS ONLY.
-    
-    CRITICAL: Ultrasonic sensor is on the LEFT SIDE, so it cannot detect
-    obstacles in front during forward motion. We ONLY use touch sensors here.
-    
-    Beeps when obstacle is found.
-    
-    Returns:
-        float: 从起点到碰撞点的距离（mm），如果超时则返回 None
-    """
-    global gyro_offset
-    
-    print("[drive_until_obstacle_detected] 开始前进，速度 = {}".format(speed))
-    wait(10)
-    
-    # 保存当前全局航向角，然后重置陀螺仪
-    update_odometry()
-    gyro_offset = robot_heading
-    gyro.reset_angle(0)
-    
-    # 重置并同步编码器
-    reset_and_sync_encoders()
-    initial_gyro = gyro.angle()
-    gyro_error = 0
-    left_speed = 0
-    right_speed = 0
-    wait(10)
-    
-    GYRO_CORRECTION_KP = 1.5
-    
-    while True:  
-        # Update odometry during movement
-        update_odometry()
-        print("[drive_until_obstacle_detected] 前进中：gyro = {:.2f}°，触碰左 = {}，触碰右 = {}".format(
-            gyro.angle(), touch_left.pressed(), touch_right.pressed()))
-    
-        
-        # CRITICAL: ONLY check touch sensors - ultrasonic is on left side, not front!
-        # Touch sensors are the reliable way to detect collision with front wall
-        if touch_left.pressed() or touch_right.pressed():
-            left_motor.stop(Stop.BRAKE)
-            right_motor.stop(Stop.BRAKE)
-            ev3.speaker.beep()
-            update_odometry()
-            
-            # 计算从起点到碰撞点的总直行距离
-            avg_rot = (abs(left_motor.angle()) + abs(right_motor.angle())) / 2
-            dist_mm = (avg_rot / 360.0) * WHEEL_CIRCUMFERENCE_MM
-            print("[drive_until_obstacle_detected] 检测到碰撞：距离 = {:.1f} mm".format(dist_mm))
-            return dist_mm  # 返回距离（mm）
-        
-        # Gyro correction to maintain straight path
-        gyro_error = gyro.angle() - initial_gyro
-        correction = GYRO_CORRECTION_KP * gyro_error
-        # 这里“correction = max(-20, min(20, correction))”的含义是限制矫正转向的最大幅度，和“后退20cm”无关
-        correction = max(-30, min(30, correction))
-        
-        left_speed = speed - correction
-        right_speed = speed + correction
-        print("[drive_until_obstacle_detected] 纠偏：误差 = {:.2f}°，修正 = {:.2f}，左轮 = {:.2f}，右轮 = {:.2f}".format(
-            gyro_error, correction, left_speed, right_speed))
-        
-        left_motor.run(left_speed)
-        right_motor.run(right_speed)
-        
-        wait(10)
-
-# 这个方法是根据机器人与墙的相对位置来判断应该采取哪种恢复策略, 也就是恢复策略的判断依据
-def handle_collision_recovery_intelligent():
-    """
-    简化的沿墙碰撞处理：后退，然后向右旋转90度。
-
-    用于沿墙过程中任何触碰传感器触发的情形，统一采取相同行为，
-    以确保稳定继续逆时针贴左墙绕行。
-
-    Returns:
-        True after performing the recovery motion.
-    """
-    print("[handle_collision_recovery_intelligent] 触发碰撞恢复")
-    # 停车
-    left_motor.stop(Stop.BRAKE)
-    right_motor.stop(Stop.BRAKE)
-    wait(50)
-
-    # 统一后退距离（可按需要微调）
-    BACKUP_MM = 150
-    drive_straight_pid(-BACKUP_MM, speed=DRIVE_SPEED * 0.7)
-    wait(150)
-
-    # 向右旋转90度（顺时针）
-    turn_in_place_simple(90, speed=TURN_SPEED)
-    wait(120)
-
-    print("[handle_collision_recovery_intelligent] 恢复结束：已后退 {} mm 并右转 90°".format(BACKUP_MM))
-    return True
-
-# 这个方法是根据机器人与墙的相对位置来判断应该采取哪种恢复策略, 也就是恢复策略的判断依据
-def check_pose_intelligent():
-    """
-    智能姿态检测，采用多种方法综合判断：
-    1. 检查超声波测距（处理无穷大/超出范围的情况）
-    2. 检查碰撞传感器（触碰开关）
-    3. 前进/后退小距离探测墙体位置
-    4. 分析机器人朝向与角度信息
-
-    返回值:
-        (是否需要调整, 调整类型, 距离值)
-        调整类型包括: 'too_close'(距离太近), 'too_far'(距离太远), 'corner_detected'(检测到转角), 'collision'(发生碰撞), None(不需要调整)
-    """
-    global last_valid_wall_distance
-    update_odometry()  # 中文：先更新里程计，确保机器人位置信息是最新的
-    print("[check_pose_intelligent] 开始深度姿态检查")
-    
-    # 中文：第一步，先检测碰撞传感器（左右两个按钮），优先级最高
-    left_pressed = touch_left.pressed()
-    right_pressed = touch_right.pressed()
-    
-    if left_pressed or right_pressed:
-        # 中文：只要有一个碰撞传感器被触发，说明发生碰撞，立即返回需要调整类型为“collision”
-        print("[check_pose_intelligent] 碰撞传感器触发：左 = {}，右 = {}".format(left_pressed, right_pressed))
-        return (True, 'collision', None)
-    
-    # 中文：第二步，读取多次超声波测距，取平均值，过滤噪音
-    distances = []
-    for i in range(7):
-        dist = ultrasonic.distance()
-        if dist > 0 and dist <= 2000:
-            distances.append(dist)   # 中文：只收集有效（大于0，小于2000mm）的数据
-        # except:
-        #         # 中文：如果测距异常（如传感器抖动），跳过本次
-        #         pass
-        wait(10)  # 中文：每次采集间间隔10ms
-    
-    if len(distances) == 0:
-        # 中文：连续多次都无法读取有效距离，极有可能在拐角或者传感器异常
-        print("[check_pose_intelligent] 超声波无有效读数，判定拐角")
-        return (True, 'corner_detected', last_valid_wall_distance)
-    
-    avg_distance = sum(distances) / len(distances)  # 中文：有效测距的均值
-    last_valid_wall_distance = avg_distance
-    print("[check_pose_intelligent] 平均墙距 = {:.1f} mm".format(avg_distance))
-    
-    # 中文：第三步，检查距离超范围（比如无穷大或者小于0），属于拐角或墙体尽头
-    if avg_distance > 2000 or avg_distance < 0:
-        return (True, 'corner_detected', last_valid_wall_distance)
-    
-    # 中文：第四步，判断是否太近（距离小于目标距离-50mm）、太远（大于最大设定距离）
-    if avg_distance < TARGET_WALL_DISTANCE_MM - 50:  # 中文：距离目标墙小于15厘米，太近
-        print("[check_pose_intelligent] 判定过近：目标 = {} mm，当前 = {:.1f} mm".format(
-            TARGET_WALL_DISTANCE_MM, avg_distance))
-        return (True, 'too_close', avg_distance)
-    elif avg_distance > MAX_WALL_DISTANCE_MM:        # 中文：距离目标墙大于28厘米，太远
-        print("[check_pose_intelligent] 判定过远：上限 = {} mm，当前 = {:.1f} mm".format(
-            MAX_WALL_DISTANCE_MM, avg_distance))
-        return (True, 'too_far', avg_distance)
-    
-    # 中文：第五步，主动前探——机器人向前探测30mm，再判断距离变化，用于辅助检测拐角
-    initial_distance = avg_distance    # 中文：记录初始距离，后面用于计算变化
-    initial_gyro = gyro.angle()        # 中文：记录初始角度，便于直行修正
-    
-    # 中文：复位电机编码器，准备前行
-    update_odometry()  # 清算残余位移
-    reset_and_sync_encoders()
-    probe_distance = 50
-    target_rotation = (probe_distance / WHEEL_CIRCUMFERENCE_MM) * 360  # 中文：把前行距离转换成编码器角度
-    
-    while True:
-        # 中文：前探过程中随时检测是否发生碰撞
-        if touch_left.pressed() or touch_right.pressed():
-            left_motor.stop(Stop.BRAKE)
-            right_motor.stop(Stop.BRAKE)
-            # 中文：前探时如果撞上障碍，立刻停止、后退
-            drive_straight_pid(-probe_distance, speed=DRIVE_SPEED * 0.6)
-            return (True, 'collision', None)
-        
-        avg_rotation = (abs(left_motor.angle()) + abs(right_motor.angle())) / 2
-        # 中文：已经前进到指定距离，跳出循环
-        if avg_rotation >= target_rotation:
-            break
-        
-        # 中文：用陀螺仪做直行校正，避免探测歪斜
-        gyro_error = gyro.angle() - initial_gyro
-        correction = 2.0 * gyro_error
-        left_motor.run(DRIVE_SPEED * 0.6 - correction)
-        right_motor.run(DRIVE_SPEED * 0.6 + correction)
-        wait(10)
-    
-    left_motor.stop(Stop.BRAKE)
-    right_motor.stop(Stop.BRAKE)
-    wait(100)  # 中文：短暂停止，等待惯性消失
-    
-    # 中文：第六步，前探后再次测距，分析距离变化幅度，如果变化剧烈说明前面是拐角
-    try:
-        probe_distance_reading = ultrasonic.distance()
-        if probe_distance_reading > 0 and probe_distance_reading <= 2000:
-            distance_change = abs(probe_distance_reading - initial_distance)
-            
-            # 中文：如果距离突然变化超过100mm，判定为拐角。先退回原位，再报告“corner_detected”
-            if distance_change > 100:
-                # 中文：退回到原位
-                drive_straight_pid(-probe_distance, speed=DRIVE_SPEED * 0.6)
-                last_valid_wall_distance = initial_distance
-                return (True, 'corner_detected', last_valid_wall_distance)
-    except:
-        # 中文：如果探测超声波异常，忽略
-        pass
-    
-    # 中文：最后一步，不论前探测出什么，都要退回原位置，保证机器人实际位置不变
-    drive_straight_pid(-probe_distance, speed=DRIVE_SPEED * 0.6)
-    wait(100)
-    
-    # 中文：最终判断为无需调整，返回False和当前平均距离
-    last_valid_wall_distance = avg_distance
-    return (False, None, avg_distance)
-
-# 这个方法是根据机器人与墙的相对位置来判断应该采取哪种恢复策略, 也就是恢复策略的判断依据
-def check_pose_and_adjust():
-    """
-    快速姿态检查，仅返回是否需要立即恢复的标志，不直接执行动作。
-    返回:
-        (needs_adjust, reason, distance_mm)
-        reason ∈ {'collision', 'too_close', None}
-    """
-    global last_valid_wall_distance
-    update_odometry()
-    print("[check_pose_and_adjust] 开始快速姿态检查")
-    
-    left_pressed = touch_left.pressed()
-    right_pressed = touch_right.pressed()
-    
-    if left_pressed or right_pressed:
-        print("[check_pose_and_adjust] 碰撞：左 = {}，右 = {}".format(left_pressed, right_pressed))
-        return (True, 'collision', None)
-    
-    try:
-        distance = ultrasonic.distance()
-        if distance <= 0 or distance > 2000:
-            print("[check_pose_and_adjust] 快速检查：距离无效 {}".format(distance))
-            return (False, None, None)
-    except:
-        print("[check_pose_and_adjust] 快速检查：超声波异常")
-        return (False, None, None)
-    
-    last_valid_wall_distance = distance
-    if distance < TARGET_WALL_DISTANCE_MM - 50:
-        print("[check_pose_and_adjust] 判定过近：{} mm".format(distance))
-        return (True, 'too_close', distance)
-    
-    print("[check_pose_and_adjust] 姿态正常：{} mm".format(distance))
-    return (False, None, distance)
-
-
-def apply_wall_adjustment(adjustment_type, measured_distance=None):
-    """
-    根据姿态检查结果执行相应的恢复/调整动作。
-    返回True表示确实执行了调整。
-    """
-    if adjustment_type == 'collision':
-        print("[apply_wall_adjustment] 执行碰撞恢复")
-        handle_collision_recovery_intelligent()
-        return True
-    
-    if adjustment_type == 'too_close':
-        if measured_distance is not None:
-            print("[apply_wall_adjustment] 离墙过近，测距 = {:.1f} mm".format(measured_distance))
-        drive_straight_pid(-80, speed=DRIVE_SPEED * 0.6)
-        wait(200)
-        turn_in_place_simple(25, speed=TURN_SPEED * 0.6)
-        wait(150)
-        return True
-    
-    if adjustment_type == 'too_far':
-        if measured_distance is not None:
-            print("[apply_wall_adjustment] 离墙过远，测距 = {:.1f} mm".format(measured_distance))
-        turn_in_place_simple(-20, speed=TURN_SPEED * 0.7)
-        wait(200)
-        drive_straight_pid(50, speed=DRIVE_SPEED * 0.6)
-        wait(200)
-        return True
-    
-    global last_valid_wall_distance
-    if adjustment_type == 'corner_detected':
-        print("[apply_wall_adjustment] 检测拐角，开始处理")
-        left_pressed = touch_left.pressed()
-        right_pressed = touch_right.pressed()
-        effective_distance = measured_distance if measured_distance is not None else last_valid_wall_distance
-        last_valid_wall_distance = effective_distance
-        if left_pressed or right_pressed:
-            drive_straight_pid(-100, speed=DRIVE_SPEED * 0.7)
-            wait(200)
-            turn_in_place_simple(60, speed=TURN_SPEED * 0.8)
-            wait(200)
-            drive_straight_pid(80, speed=DRIVE_SPEED * 0.6)
-        else:
-            if abs(effective_distance - TARGET_WALL_DISTANCE_MM) <= CORNER_DISTANCE_TOLERANCE_MM:
-                drive_straight_pid(80, speed=DRIVE_SPEED * 0.7)
-                wait(200)
-                turn_in_place_simple(-85, speed=TURN_SPEED * 0.8)
-                wait(200)
-                drive_straight_pid(60, speed=DRIVE_SPEED * 0.6)
-                wait(200)
-                return True
-            drive_straight_pid(120, speed=DRIVE_SPEED * 0.7)
-            wait(200)
-            for i in range(3):
-                try:
-                    distance_left = ultrasonic.distance()
-                except:
-                    distance_left = None
-                
-                if distance_left is not None and distance_left < TARGET_WALL_DISTANCE_MM + 40:
-                    turn_in_place_simple(-80, speed=TURN_SPEED * 0.7)
-                    wait(200)
-                    break
-                wait(100)
-            else:
-                turn_in_place_simple(-50, speed=TURN_SPEED * 0.7)
-                wait(200)
-        return True
-    
-    return False
-
-
-def assess_and_correct_pose(run_deep_check=True):
-    """
-    组合快速检测与智能检测；可根据 run_deep_check 决定是否执行深度探测。
-    返回:
-        (did_adjust, adjustment_reason, measured_distance)
-    """
-    quick_needs, quick_reason, quick_distance = check_pose_and_adjust()
-    print("[assess_and_correct_pose] 快速检查结果：needs = {}，reason = {}，distance = {}".format(
-        quick_needs, quick_reason, quick_distance))
-    if quick_needs:
-        apply_wall_adjustment(quick_reason, quick_distance)
-        return (True, quick_reason, quick_distance)
-    
-    if not run_deep_check:
-        print("[assess_and_correct_pose] 跳过深度检查")
-        return (False, None, quick_distance)
-    
-    needs_adjust, adjustment_type, check_distance = check_pose_intelligent()
-    print("[assess_and_correct_pose] 深度检查结果：needs = {}，reason = {}，distance = {}".format(
-        needs_adjust, adjustment_type, check_distance))
-    if needs_adjust:
-        apply_wall_adjustment(adjustment_type, check_distance)
-        return (True, adjustment_type, check_distance)
-    
-    return (False, None, check_distance)
-
-
-def prepare_wall_following(max_attempts=3):
-    """
-    在开始沿墙前，预先进行若干次姿态检查，确保距离墙体稳定。
-    """
-    attempts = 0
-    while attempts < max_attempts:
-        print("[prepare_wall_following] 第 {} 次姿态检查".format(attempts + 1))
-        adjusted, reason, _ = assess_and_correct_pose(run_deep_check=(attempts == 0))
-        if not adjusted:
-            print("[prepare_wall_following] 姿态稳定，结束预检")
-            return
-        print("[prepare_wall_following] 已执行调整：{}".format(reason))
-        attempts += 1
-        wait(200)
-    print("[prepare_wall_following] 达到最大尝试次数")
-
-# 沿着墙走，直到接近hit point, 核心的算法部分
-
-def follow_wall_until_hit_point(hit_point_x, hit_point_y, wall_start_x=None, wall_start_y=None, 
-                                target_distance_mm=TARGET_WALL_DISTANCE_MM, speed=DRIVE_SPEED,
-                                exit_straight_distance_mm=0):
-    """
-    沿墙前进直到回到 Hit Point，并在回到时执行离开动作
-    
-    Args:
-        hit_point_x, hit_point_y: Hit Point 坐标（定义为 2000, 500）
-        wall_start_x, wall_start_y: 开始沿墙的坐标（通常与 hit_point 相同，因为转向是原地转向）
-        target_distance_mm: 目标墙距（默认 200mm）
-        speed: 前进速度
-        exit_straight_distance_mm: 离开时直走的距离（从起点到Hit Point的距离）
-    
-    工作原理：
-        1. 机器人从 Hit Point 右转90度后开始沿墙
-        2. 沿着障碍物左侧绕行一圈
-        3. 判断标准：当前位置距离目标点 < 100mm 时认为已回到起点
-        4. 回到起点后：停车 → 右转90° → 直走 exit_straight_distance_mm → 停止
-    """
-    
-    # 如果提供了 wall_start 坐标，使用它；否则使用 hit_point
-    # 注意：由于转向是原地转向，这两个坐标通常是相同的
-    target_x = wall_start_x if wall_start_x is not None else hit_point_x
-    target_y = wall_start_y if wall_start_y is not None else hit_point_y
-
-    global last_valid_wall_distance
-    # 初始化PID相关变量（所有增益都较弱，防止过度反应）
-    integral = 0
-    last_error = 0
-    last_distance = target_distance_mm
-    ALPHA = 0.5  # 滤波参数，用于距离平滑
-
-    print("[follow_wall_until_hit_point] 开始沿墙：目标墙距 = {} mm，速度 = {}".format(
-        target_distance_mm, speed))
-    # 清算残余位移，重置并同步编码器
-    update_odometry()
-    reset_and_sync_encoders()
-
-    step_count = 0  # 步数计数
-    min_distance_seen = float('inf')  # 跟踪离hit点最近的距离
-    initial_distance_to_hit = None    # 首次记录距离hit点的位置
-    max_distance_from_hit = 0         # 记录离hit点最远的距离
-
-    while True:
-        step_count += 1  # 步号+1
-
-        # ========== 步骤1：走一步 ==========
-        # 计算这一步需要转多少度（将距离转换为电机角度）
-        target_rotation = (STEP_DISTANCE_MM / WHEEL_CIRCUMFERENCE_MM) * 360
-
-        # 读取超声波测距，做平滑处理（防止噪声带来的大跳变）
-        raw_distance = None
-        try:
-            raw_distance = ultrasonic.distance()
-            if raw_distance <= 0 or raw_distance > 2000:
-                # 距离异常就用上一次的
-                current_distance = last_distance
-            else:
-                current_distance = ALPHA * raw_distance + (1 - ALPHA) * last_distance
-                last_valid_wall_distance = current_distance
-        except:
-            # 读取异常也用上次的
-            current_distance = last_distance
-
-        last_distance = current_distance   # 存档本次测距
-        raw_display = "None" if raw_distance is None else int(raw_distance)
-        print("[follow_wall_until_hit_point] 步 {}：原始距离 = {}，滤波后 = {:.1f}，误差 = {:.1f}".format(
-            step_count, raw_display, current_distance, target_distance_mm - current_distance))
-
-        # 计算距离误差，准备PID
-        error = target_distance_mm - current_distance
-
-        # PID控制部分（参数都取较小，防止突兀修正）
-        p = WALL_KP * error
-        integral += error * 0.1  # 积分项带缩放，防积分爆炸
-        integral = max(-20, min(20, integral))  # 限制积分项范围
-        i = WALL_KI * integral
-        derivative = (error - last_error) / 1.0
-        d = WALL_KD * derivative
-        last_error = error
-
-        correction = p + i + d
-        # 再限制修正量，放缓反应速度
-        correction = max(-60, min(60, correction))
-        print("[follow_wall_until_hit_point] PID：P = {:.2f}，I = {:.2f}，D = {:.2f}，修正 = {:.2f}".format(
-            p, i, d, correction))
-
-        # 按照PID调整之后的左右轮速度
-        # 如果太靠近墙壁（error>0，correction>0），左电机快，机器人右转，远离墙
-        # 如果太远，则右轮快，机器人左转，靠近墙
-        left_speed = speed + correction
-        right_speed = speed - correction
-
-        # 限制实际速度（安全+防止速度过大形变）
-        min_speed = 50
-        max_speed = speed * 1.4
-        left_speed = max(min_speed, min(max_speed, left_speed))
-        right_speed = max(min_speed, min(max_speed, right_speed))
-        print("[follow_wall_until_hit_point] 速度限制：左 = {:.2f}，右 = {:.2f}".format(left_speed, right_speed))
-
-        # 每走一步都清零电机转角，记录起始陀螺仪角度
-        # 注意：这里不需要先 update_odometry()，因为我们只是为了测量本步距离
-        reset_and_sync_encoders()
-        initial_gyro = gyro.angle()
-
-        while True:
-            # 检查碰撞（触碰传感器是否按下）
-            left_pressed = touch_left.pressed()
-            right_pressed = touch_right.pressed()
-
-            if left_pressed or right_pressed:
-                left_motor.stop(Stop.BRAKE)
-                right_motor.stop(Stop.BRAKE)
-                wait(100)
-
-                # 智能碰撞恢复（根据哪个传感器撞到来调整）
-                handle_collision_recovery_intelligent()
-                integral = 0
-                last_error = 0
-                break
-
-            # 用陀螺仪纠偏直线（防止偏航）
-            gyro_error = gyro.angle() - initial_gyro
-            gyro_correction = 2.0 * gyro_error  # 校准比例
-            gyro_correction = max(-20, min(20, gyro_correction))  # 避免修正过大
-
-            left_step_speed = left_speed - gyro_correction
-            right_step_speed = right_speed + gyro_correction
-
-            # 运行电机前进一步
-            left_motor.run(left_step_speed)
-            right_motor.run(right_step_speed)
-
-            # ★ 每步内做里程计积分，捕捉弧线位移
-            update_odometry()
-
-            # 判断走的距离是否达到本步目标
-            avg_rotation = (abs(left_motor.angle()) + abs(right_motor.angle())) / 2
-            if avg_rotation >= target_rotation:
-                left_motor.stop(Stop.BRAKE)
-                right_motor.stop(Stop.BRAKE)
-                break
-
-            wait(10)  # 循环检测响应快一些
-
-        # 步进完成后短暂停顿
+# ============================ MAIN SEQUENCE ==============================
+def main():
+    ev3.speaker.beep()
+    ev3.screen.clear()
+    ev3.screen.print("按下中键开始")
+    while Button.CENTER not in ev3.buttons.pressed():
         wait(50)
+    ev3.speaker.beep()
+    wait(300)
 
-        # ========== 步骤2：姿态检查和必要调整 ==========
-        run_deep_check = (step_count == 1) or (step_count % STEP_CHECK_INTERVAL == 0)
-        adjusted, adjustment_reason, check_distance = assess_and_correct_pose(run_deep_check=run_deep_check)
-        if adjusted:
-            print("[follow_wall_until_hit_point] 姿态调整：{}".format(adjustment_reason))
-            integral = 0
-            last_error = 0
-            last_distance = target_distance_mm
-            wait(150)
+    # 1) INITIAL APPROACH: drive straight until bump; record approach distance from START
+    base_init = gyro_zero()
+    left_motor.reset_angle(0)
+    right_motor.reset_angle(0)
+    drive_straight_heading_with_base(
+        target_deg=0.0,
+        base=base_init,
+        speed_mm_s=SPEED_MM_S,
+        stop_cond_fn=bump_pressed
+    )
+    ev3.speaker.beep()
+
+    encoder_avg_deg = 0.5 * (left_motor.angle() + right_motor.angle())
+    approach_contact_mm = encoder_avg_deg * MM_PER_DEG  # used at the very end to return to start
+
+    # 2) BACK OFF → RIGHT 90° (relative to base_init) → SET ODOM ORIGIN
+    backoff_deg = (HIT_BACKOFF_MM / (pi * WHEEL_DIAM_MM)) * 360.0
+    left_motor.reset_angle(0)
+    right_motor.reset_angle(0)
+    left_motor.run_target(speed=240, target_angle=-backoff_deg, then=Stop.HOLD, wait=False)
+    right_motor.run_target(speed=240, target_angle=-backoff_deg, then=Stop.HOLD, wait=True)
+
+    base_init = gyro_zero()
+    current_init = gyro_angle_rel(base_init)
+    turn_to_heading_with_base(current_init + 90.0, base=base_init, tol=2.0, kp=3.0, max_sp=200)
+
+    # Set odometry origin and heading (local origin is the hit point)
+    odom_reset()
+
+    # === NEW: set global mapping so local (0,0) aligns to lab HIT_POINT (2000,500)
+    set_global_origin_at_current_local_hit_point()
+
+    # 3) WALL FOLLOW (LEFT ULTRASONIC) until back near HIT_POINT in global frame after enough perimeter
+    timer = StopWatch()
+    S_wall = 0.0
+    d_s = ultrasonic.distance() or TARGET_DIST_MM
+    d_prev = d_s
+    e_prev = 0.0
+    v_cmd_follow = mps_to_dps(FOLLOW_SPEED_MM_S)
+
+    # Dead-reckoning timing (for x,y and S_wall only)
+    last_time_ms = timer.time()
+    
+    while True:
+        loop_t = timer.time()
+
+        # Real elapsed dt (sec) for odometry/perimeter
+        now_ms = timer.time()
+        dt_s = max(0.01, (now_ms - last_time_ms) / 1000.0)
+
+        # (A) Bump safety
+        if bump_pressed():
+            left_motor.stop(Stop.BRAKE)
+            right_motor.stop(Stop.BRAKE)
+
+            # back off (translation)
+            bump_backoff_deg = (BUMP_BACKOFF_MM / (pi * WHEEL_DIAM_MM)) * 360.0
+            left_motor.run_angle(speed=240, rotation_angle=-bump_backoff_deg, then=Stop.HOLD, wait=False)
+            right_motor.run_angle(speed=240, rotation_angle=-bump_backoff_deg, then=Stop.HOLD, wait=True)
+            odom_update()
+
+            # small right turn (in-place)
+            curr = gyro_angle_rel(base_heading)
+            turn_to_heading(curr + BUMP_RIGHT_DEG, tol=2.0, kp=3.0, max_sp=200)
+            odom_freeze_wheels()   # prevent phantom translation after in-place turn
+
+            # short surge (translation)
+            surge_deg = (BUMP_SURGE_MM / (pi * WHEEL_DIAM_MM)) * 360.0
+            left_motor.run_angle(speed=240, rotation_angle=surge_deg, then=Stop.HOLD, wait=False)
+            right_motor.run_angle(speed=240, rotation_angle=surge_deg, then=Stop.HOLD, wait=True)
+            odom_update()
+
+            wait(40)
+            last_time_ms = timer.time()
             continue
 
-        if check_distance is None:
-            check_distance = current_distance
+        # (B) Ultrasonic read + tape/corner handling
+        d_raw = ultrasonic.distance()
 
-        # ========== 步骤3：判断是否回到起点（开始沿墙的位置） ==========
-        dist_to_target = distance_to_point(target_x, target_y)
-        print("Hit point distance:", int(dist_to_target), "mm")
+        # "No wall" → peek right + surge
+        if d_raw is not None and d_raw >= ULTRA_MAX_RANGE:
+            curr = gyro_angle_rel(base_heading)
+            peek_right = curr - CORNER_PEEK_RIGHT_DEG
+            turn_to_heading(peek_right, tol=3.0, kp=3.0, max_sp=200)
+            odom_freeze_wheels()
+            surge_deg = 360.0 * CORNER_SURGE_MM / (pi * WHEEL_DIAM_MM)
+            left_motor.run_angle(speed=240, rotation_angle=surge_deg, then=Stop.HOLD, wait=False)
+            right_motor.run_angle(speed=240, rotation_angle=surge_deg, then=Stop.HOLD, wait=True)
+            odom_update()
+            d_raw = ultrasonic.distance() or d_s
 
-        # 初次记录离起点的距离，用于判断是否真的绕了一圈
-        if initial_distance_to_hit is None:
-            initial_distance_to_hit = dist_to_target
+        # Tape glitch window → treat as mild increase; also clamp per-step jump
+        if d_raw is None or (d_raw > ULTRA_TAPE_GLITCH and d_raw < ULTRA_MAX_RANGE):
+            d_raw = d_s + MAX_D_STEP
+        if abs(d_raw - d_s) > MAX_D_STEP:
+            d_raw = d_s + (MAX_D_STEP if d_raw > d_s else -MAX_D_STEP)
 
-        # 记录离起点的最近和最远处
-        if dist_to_target < min_distance_seen:
-            min_distance_seen = dist_to_target
-        if dist_to_target > max_distance_from_hit:
-            max_distance_from_hit = dist_to_target
+        # EMA smoothing
+        d_s = (1 - EMA_ALPHA) * d_s + EMA_ALPHA * d_raw
 
-        # 如果距离足够近（且已绕墙远走过一段），就判定为走完一圈
-        if dist_to_target < HIT_POINT_TOLERANCE_MM:
-            if step_count > 20 and max_distance_from_hit > initial_distance_to_hit + 200:
-                # ========== 立即执行离开动作 ==========
-                
-                # 1) 立即停车
-                left_motor.stop(Stop.BRAKE)
-                right_motor.stop(Stop.BRAKE)
-                ev3.speaker.beep(frequency=1000, duration=200)
-                wait(500)
-                
-                # 2) 原地右转 90°
-                turn_in_place_simple(90, speed=TURN_SPEED)
-                wait(300)
-                
-                # 3) 直行"开头直行的距离"（起点→Hit Point）
-                if exit_straight_distance_mm > 0:
-                    drive_straight_pid(exit_straight_distance_mm, speed=DRIVE_SPEED)
-                    wait(300)
-                
-                # 4) 最终停止并返回
-                left_motor.stop(Stop.BRAKE)
-                right_motor.stop(Stop.BRAKE)
-                update_odometry()
-                print("[follow_wall_until_hit_point] 已完成一圈，准备执行离开动作")
-                return  # ← 直接结束函数
+        # (B2) Sharp LEFT-corner detect (~20 ms derivative timing)
+        e_prov  = d_s - TARGET_DIST_MM
+        de_prov = (d_s - d_prev) / 0.02
 
-        # ========== 步骤4：每隔5步更新界面，显示进展和传感器状态 ==========
+        if (e_prov > LEFT_CORNER_GAP) and (de_prov > LEFT_CORNER_DE_DOT):
+            curr = gyro_angle_rel(base_heading)
+            turn_to_heading(curr + CORNER_PEEK_LEFT_DEG, tol=3.0, kp=3.0, max_sp=220)
+            odom_freeze_wheels()
+            surge_deg = 360.0 * CORNER_SURGE_LEFT_MM / (pi * WHEEL_DIAM_MM)
+            left_motor.run_angle(speed=240, rotation_angle=surge_deg, then=Stop.HOLD, wait=False)
+            right_motor.run_angle(speed=240, rotation_angle=surge_deg, then=Stop.HOLD, wait=True)
+            odom_update()
 
-        wait(100)  # 步与步之间短暂延时
+            d_prev = d_s
+            d_raw = ultrasonic.distance() or d_s
+            wait(20)
+            last_time_ms = timer.time()
+            continue
 
+        # (C) Wall PD + gyro damping (~20 ms diff)
+        e  = d_s - TARGET_DIST_MM
+        de = (e - e_prev) / 0.02
+        e_prev = e
+        steer_d = Kp_d * e + Kd_d * de
+        omega = gyro.speed()
+        steer_h = -Kd_h * omega
 
-# ============================ MAIN PROGRAM =============================
+        diff = (steer_d * 180.0) + steer_h
+        diff = max(-MAX_DIFF, min(MAX_DIFF, diff))
 
-def main():
-    """
-    Main program that executes the complete Lab 3 task sequence.
-    """
-    # 声明所有需要修改的全局变量
-    global start_point_x, start_point_y, robot_x, robot_y, gyro_offset
-    
-    try:
-        # ========== Startup ==========
-        ev3.speaker.beep()
+        # (D) Apply speeds
+        vL = v_cmd_follow - diff
+        vR = v_cmd_follow + diff
+        set_wheels(vL, vR, MAX_SPEED_FOLLOW, MIN_SPEED_FOLLOW)
 
-        # Wait for button press
-        while True:
-            if Button.CENTER in ev3.buttons.pressed():
-                break
-            wait(10)
-        
-        ev3.speaker.beep()
-        wait(1000)
-        
-        # 记录起始点坐标（星星位置 ⭐）
-        # 此时坐标为 (0, 0)，这是真正的物理起始位置
-        start_point_x = robot_x  # 0.0
-        start_point_y = robot_y  # 0.0
-        print("[main] 起点记录：({:.1f}, {:.1f})".format(start_point_x, start_point_y))
-        
-        # ========== Phase 1: Drive Forward Until Obstacle Detected ==========
-        print("[main] 阶段1：前进寻找障碍物")
-        
-        # 直行直到碰撞，获取起点→碰撞点的距离
-        dist_to_collision = drive_until_obstacle_detected(speed=DRIVE_SPEED)
-        if dist_to_collision is None:
-            return
-        print("[main] 碰撞距离：{:.1f} mm".format(dist_to_collision))
-        wait(500)
-        
-        # ========== Phase 2: Record Hit Point and Back Up ==========
-        print("[main] 阶段2：回退至 Hit Point")
-        
-        # 后退到 Hit Point（距离障碍物前墙 20cm 的位置）
-        # 根据规格："The point directly in front of your robot and 20 cm away 
-        # from the obstacle's front wall will be known as the hit point."
-        drive_straight_pid(-BACKUP_DISTANCE_MM, speed=DRIVE_SPEED)
-        wait(500)
-        
-        # 重要：在这个位置，我们定义坐标为 (2000, 500)
-        # 这是坐标系的校准点，后续所有坐标都基于这个参考点
-        update_odometry()  # 先结清残余位移
-        # 注意：global 变量已在函数开头声明
-        robot_x = HIT_POINT_X_MM  # 手动设置X坐标为2000mm
-        robot_y = HIT_POINT_Y_MM  # 手动设置Y坐标为500mm
-        hit_point_x = robot_x
-        hit_point_y = robot_y
-        hit_point_heading = robot_heading
-        print("[main] Hit Point 设置：坐标 = ({:.1f}, {:.1f})，航向 = {:.1f}°".format(
-            hit_point_x, hit_point_y, hit_point_heading))
-        
-        # 记录"离开时要直走的距离"（起点→Hit Point）
-        # 这是从起点到碰撞点的距离减去后退的200mm
-        exit_straight_distance = max(0, dist_to_collision - BACKUP_DISTANCE_MM)
-        print("[main] 记录离开直行距离：{:.1f} mm".format(exit_straight_distance))
+        # (E) Odom + perimeter (use real dt)
+        ds = odom_update()
+        v_mm_s = abs(ds) / dt_s
+        d_dot  = (d_s - d_prev) / dt_s
+        d_prev = d_s
+        v_parallel = sqrt(max(v_mm_s*v_mm_s - d_dot*d_dot, 0.0))
+        S_wall += v_parallel * dt_s
 
-        
-        # ========== Phase 3: Turn Right 90° ==========
-        print("[main] 阶段3：原地右转 90°")
+        # (F) Exit condition: only after enough perimeter and near HIT_POINT in GLOBAL frame
+        if S_wall > PERIM_MIN_MM and dist_global_to_hit() < HIT_RADIUS_MM:
+            ev3.speaker.beep()
+            break
 
-        
-        #turn_in_place_pid(90, speed=TURN_SPEED)  # Positive = clockwise (right)
-        turn_in_place_simple(90, speed=TURN_SPEED)  # Positive = clockwise (right)
-        wait(500)
-        
-        # Reset gyro to establish new "forward" direction (parallel to wall)
-        # 重要：在重置陀螺仪前，先保存当前的全局航向角
-        update_odometry()  # 确保 robot_heading 是最新的
-        # 注意：global 变量已在函数开头声明
-        gyro_offset = robot_heading  # 保存当前全局航向角作为偏移量
-        gyro.reset_angle(0)  # 重置陀螺仪为0（用于沿墙控制）
-        wait(300)
-        update_odometry()  # 更新后 robot_heading = 0 + gyro_offset，保持全局坐标系一致
-        
-        # 更新 hit_point_heading 为转向后的航向角
-        hit_point_heading = robot_heading
-        print("[main] 右转完成：当前航向 = {:.1f}°".format(hit_point_heading))
-        
-        prepare_wall_following()
-        print("[main] 姿态预检完成，准备沿墙")
-        
-        ev3.speaker.beep()
-        wait(500)
-        
-        # ========== Phase 4: Wall Following Until Back Near Hit Point ==========
-        print("[main] 阶段4：沿墙跟随返回 Hit Point")
-        
-        # 沿墙直到回到 Hit Point，并在回到时执行离开动作
-        # 离开动作：停车 → 右转90° → 直走 exit_straight_distance → 停止
-        follow_wall_until_hit_point(hit_point_x, hit_point_y,
-                                   wall_start_x=hit_point_x,
-                                   wall_start_y=hit_point_y,
-                                   target_distance_mm=TARGET_WALL_DISTANCE_MM, 
-                                   speed=DRIVE_SPEED,
-                                   exit_straight_distance_mm=exit_straight_distance)
-        
-        # 注意：离开动作已在 follow_wall_until_hit_point() 内部完成
-        # 不再需要 Phase 5 的转向和导航
-        
-        # ========== SUCCESS! ==========
-        
-        # Play victory beeps
-        for i in range(4):
-            ev3.speaker.beep(frequency=800 + i*200, duration=100)
-            wait(150)
-        
-        ev3.screen.clear()
-        ev3.screen.print("Complete!")
-        
-    except Exception as e:
-        # ========== Error Handling ==========
-        # Emergency stop
-        left_motor.stop(Stop.BRAKE)
-        right_motor.stop(Stop.BRAKE)
-        
-        # Play error beeps
-        ev3.speaker.beep(frequency=400, duration=300)
-        wait(200)
-        ev3.speaker.beep(frequency=400, duration=300)
+        print_xy()
+        spent = timer.time() - loop_t
+        wait(max(1, 20 - spent))
+        last_time_ms = timer.time()
 
+    left_motor.stop(Stop.HOLD)
+    right_motor.stop(Stop.HOLD)
 
-# ============================ RUN PROGRAM =============================
+    # 4) FINAL: TURN LEFT 90° (relative), HIT WALL, BACK OFF BY INITIAL APPROACH TO RETURN TO START
+    curr = gyro_angle_rel(base_heading)
+    target_after_left = curr - 90.0
+    turn_to_heading(target_after_left, tol=2.0, kp=3.0, max_sp=200)
 
+    drive_straight_heading(
+        target_deg=target_after_left,
+        speed_mm_s=FOLLOW_SPEED_MM_S,
+        stop_cond_fn=bump_pressed,
+        max_time_ms=120000
+    )
+    ev3.speaker.beep()
+
+    final_backoff_deg = (approach_contact_mm / (pi * WHEEL_DIAM_MM)) * 360.0
+    left_motor.reset_angle(0)
+    right_motor.reset_angle(0)
+    left_motor.run_target(speed=240, target_angle=-final_backoff_deg, then=Stop.HOLD, wait=False)
+    right_motor.run_target(speed=240, target_angle=-final_backoff_deg, then=Stop.HOLD, wait=True)
+
+    left_motor.stop(Stop.HOLD)
+    right_motor.stop(Stop.HOLD)
+    ev3.speaker.beep()
+
+# ============================ ENTRYPOINT ================================
 if __name__ == "__main__":
     main()
