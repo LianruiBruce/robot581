@@ -47,15 +47,15 @@ DRIVE_SPEED = 240             # Motor speed in degrees per second for forward mo
 TURN_SPEED = 150               # Motor speed in degrees per second for turning
 
 # Lab 3 Specific Parameters
-BACKUP_DISTANCE_MM = 150      # Distance to back away from obstacle (~15 cm)
-TARGET_WALL_DISTANCE_MM = 150 # Target distance from wall during following (15 cm)
-MAX_WALL_DISTANCE_MM = 230    # Maximum allowed distance (~23 cm)
+BACKUP_DISTANCE_MM = 100      # Distance to back away from obstacle (~15 cm)
+TARGET_WALL_DISTANCE_MM = 100 # Target distance from wall during following (15 cm)
+MAX_WALL_DISTANCE_MM = 180   # Maximum allowed distance (~23 cm)
 HIT_POINT_TOLERANCE_MM = 100  # How close to be considered "back at hit point"
 OBSTACLE_DETECTION_DISTANCE_MM = 300  # Distance to detect obstacle (30 cm)
 CORNER_DISTANCE_TOLERANCE_MM = 80     # 将最后一次正常距离视为拐角的容差
 FAKE_WALL_DISTANCE_MM = 330           # 用于拐角绕行的假设墙距（25 cm）
 FAKE_WALL_DISTANCE_MAX_MM = 360       # 用于拐角绕行的假设墙距最大值（40 cm）
-LEFT_CORNER_GAP      = 600.0          # mm: d_s must exceed target by this much
+LEFT_CORNER_GAP      = 1000         # mm: d_s must exceed target by this much
 LEFT_CORNER_DE_DOT   = 700.0          # mm/s: d_s must be increasing at least this fast
 K_FAR = 10
 K_CORNER = 7
@@ -173,6 +173,7 @@ def update_odometry():
     
     # 全局航向角：注意这里使用 -gyro.angle() + offset
     robot_heading = -gyro.angle() + gyro_offset
+    print("robot_heading: ", robot_heading)
     heading_rad = math.radians(robot_heading)
     
     robot_x += forward_distance * math.cos(heading_rad)
@@ -307,7 +308,7 @@ def handle_collision_recovery_intelligent():
     drive_straight_pid(-BACKUP_MM, speed=DRIVE_SPEED * 0.7)
     wait(150)
 
-    turn_in_place_simple(70, speed=TURN_SPEED)
+    turn_in_place_simple(80, speed=TURN_SPEED)
     update_odometry()
     wait(120)
 
@@ -357,6 +358,7 @@ def on_m_line_and_closer(robot_x, robot_y,
     dist_line = point_line_distance(robot_x, robot_y,
                                     start_x, start_y,
                                     goal_x, goal_y)
+    #print("dist to line: ", dist_line)
 
     if dist_line > m_line_threshold:
         return False, last_min_dist_to_goal
@@ -366,7 +368,7 @@ def on_m_line_and_closer(robot_x, robot_y,
     dist_goal = math.sqrt(dx*dx + dy*dy)
 
     # 只有当更接近目标时才更新
-    if dist_goal + 5 < last_min_dist_to_goal:
+    if dist_goal + 2 < last_min_dist_to_goal:
         return True, dist_goal
     
     return False, last_min_dist_to_goal
@@ -397,7 +399,7 @@ def drive_towards_goal(goal_x, goal_y, m_line_heading_deg, speed=DRIVE_SPEED):
         update_odometry()
 
     initial_gyro = gyro.angle()
-    GYRO_CORRECTION_KP = 1.0
+    GYRO_CORRECTION_KP = 5
     sw = StopWatch()
     sw.reset()
     max_run_time_ms = 180000  # fail-safe，防止无限跑
@@ -426,14 +428,15 @@ def drive_towards_goal(goal_x, goal_y, m_line_heading_deg, speed=DRIVE_SPEED):
             right_motor.stop(Stop.BRAKE)
             print("Bug2: timeout while driving towards goal.")
             return "timeout"
-
-        gyro_error = gyro.angle() - initial_gyro
+        print("gyro_angle:", gyro.angle())
+        gyro_error = gyro.angle() - (-m_line_heading_deg)
         correction = GYRO_CORRECTION_KP * gyro_error
         correction = max(-40, min(40, correction))
 
+        print("correction: ", correction)
         left_motor.run(speed - correction)
         right_motor.run(speed + correction)
-        wait(20)
+        wait(500)
 
 
 # def follow_wall_step_only(speed=DRIVE_SPEED, target_distance_mm=TARGET_WALL_DISTANCE_MM):
@@ -566,7 +569,6 @@ def follow_wall_until_hit_point(goal_x, goal_y, hit_x, hit_y,
         elif current_distance< FAKE_WALL_DISTANCE_MM or current_distance >= FAKE_WALL_DISTANCE_MAX_MM:
             continue_far = 0  # Reset counter when back in normal range:
 
-        print("1")
         # --- 拐角判断 ---
         if error > LEFT_CORNER_GAP and corner_trigger_count < K_CORNER:
             corner_trigger_count += 1
@@ -605,7 +607,6 @@ def follow_wall_until_hit_point(goal_x, goal_y, hit_x, hit_y,
             wait(20)
             continue
         
-        print("2")
         # 计算距离误差，准备PID
         error = target_distance_mm - current_distance
 
@@ -633,7 +634,6 @@ def follow_wall_until_hit_point(goal_x, goal_y, hit_x, hit_y,
         max_speed = speed * 1.4
         left_speed = max(min_speed, min(max_speed, left_speed))
         right_speed = max(min_speed, min(max_speed, right_speed))
-        print("3")
         # 每走一步都清零电机转角，记录起始陀螺仪角度
         # 注意：这里不需要先 update_odometry()，因为我们只是为了测量本步距离
         #reset_and_sync_encoders()
@@ -653,7 +653,6 @@ def follow_wall_until_hit_point(goal_x, goal_y, hit_x, hit_y,
             integral = 0
             last_error = 0
             continue
-        print("7")
         # # 用陀螺仪纠偏直线（防止偏航）
         # gyro_error = gyro.angle() - initial_gyro
         # gyro_correction = 2.0 * gyro_error  # 校准比例
@@ -667,7 +666,6 @@ def follow_wall_until_hit_point(goal_x, goal_y, hit_x, hit_y,
         # print("right_speed: ", right_speed)
         left_motor.run(left_speed)
         right_motor.run(right_speed)
-        print("6")
         # ★ 每步内做里程计积分，捕捉弧线位移
         update_odometry()
 
@@ -678,7 +676,6 @@ def follow_wall_until_hit_point(goal_x, goal_y, hit_x, hit_y,
             left_motor.stop(Stop.BRAKE)
             right_motor.stop(Stop.BRAKE)
             return "goal"
-        print("5")
         leave, last_min_goal_dist = on_m_line_and_closer(
                         robot_x, robot_y,
                         start_point_x, start_point_y,
@@ -686,20 +683,17 @@ def follow_wall_until_hit_point(goal_x, goal_y, hit_x, hit_y,
                         last_min_goal_dist,
                         m_line_threshold=M_LINE_THRESHOLD_MM
                     )
-        print("8")
         if leave:
             return "leave"
         
         dist_back_to_hit = math.sqrt((robot_x - hit_x)**2 + (robot_y - hit_y)**2)
         if step_count > 50 and dist_back_to_hit < HIT_POINT_TOLERANCE_MM:
             return "hit_point"
-        print("4")
-        wait(20)  # 循环检测响应快一些
+        wait(200)  # 循环检测响应快一些
 
         if step_count %50 ==0:
             print("robot_x: ", robot_x)
             print("robot_y: ", robot_y)
-        wait(20)
 
 
 # ======================= Bug2 主程序（新增） =======================
@@ -766,7 +760,7 @@ def main_bug2():
             # 1) 沿 M-line 向目标前进
             print("robot_heading1: ", robot_heading)
             result = drive_towards_goal(goal_x, goal_y, m_line_heading_deg, speed=DRIVE_SPEED)
-
+            
             if result == "goal":
                 print("Bug2: Successfully reached goal!")
                 for i in range(3):
