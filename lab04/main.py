@@ -429,12 +429,13 @@ def drive_towards_goal(goal_x, goal_y, m_line_heading_deg, speed=DRIVE_SPEED):
             print("Bug2: timeout while driving towards goal.")
             return "timeout"
         print("gyro_angle:", gyro.angle())
-        gyro_error = gyro.angle() - (-m_line_heading_deg)
+        gyro = normalize_angle(gyro.angle())
+        gyro_error = gyro - (-m_line_heading_deg)
         correction = GYRO_CORRECTION_KP * gyro_error
         correction = max(-40, min(40, correction))
 
         print("correction: ", correction)
-        left_motor.run(speed - correction)
+        left_motor.run(speed * 1.1 - correction)
         right_motor.run(speed + correction)
         wait(500)
 
