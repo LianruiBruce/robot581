@@ -55,7 +55,7 @@ OBSTACLE_DETECTION_DISTANCE_MM = 300  # Distance to detect obstacle (30 cm)
 CORNER_DISTANCE_TOLERANCE_MM = 80     # 将最后一次正常距离视为拐角的容差
 FAKE_WALL_DISTANCE_MM = 330           # 用于拐角绕行的假设墙距（25 cm）
 FAKE_WALL_DISTANCE_MAX_MM = 360       # 用于拐角绕行的假设墙距最大值（40 cm）
-LEFT_CORNER_GAP      = 1000         # mm: d_s must exceed target by this much
+LEFT_CORNER_GAP      = 600         # mm: d_s must exceed target by this much
 LEFT_CORNER_DE_DOT   = 700.0          # mm/s: d_s must be increasing at least this fast
 K_FAR = 10
 K_CORNER = 7
@@ -87,7 +87,7 @@ FINE_KD = 3.0
 
 # ---------------------- Bug2-specific parameters ------------------------
 GOAL_TOLERANCE_MM = 100.0       # Within 10cm of goal => success
-M_LINE_THRESHOLD_MM = 80.0      # Within 8cm of M-line => considered "on M-line"
+M_LINE_THRESHOLD_MM = 100      # Within 8cm of M-line => considered "on M-line"
 
 # ============================ INITIALIZATION =============================
 
@@ -358,7 +358,7 @@ def on_m_line_and_closer(robot_x, robot_y,
     dist_line = point_line_distance(robot_x, robot_y,
                                     start_x, start_y,
                                     goal_x, goal_y)
-    #print("dist to line: ", dist_line)
+    print("dist to line: ", dist_line)
 
     if dist_line > m_line_threshold:
         return False, last_min_dist_to_goal
@@ -368,7 +368,7 @@ def on_m_line_and_closer(robot_x, robot_y,
     dist_goal = math.sqrt(dx*dx + dy*dy)
 
     # 只有当更接近目标时才更新
-    if dist_goal + 2 < last_min_dist_to_goal:
+    if dist_goal + 5 < last_min_dist_to_goal:
         return True, dist_goal
     
     return False, last_min_dist_to_goal
@@ -429,8 +429,8 @@ def drive_towards_goal(goal_x, goal_y, m_line_heading_deg, speed=DRIVE_SPEED):
             print("Bug2: timeout while driving towards goal.")
             return "timeout"
         print("gyro_angle:", gyro.angle())
-        gyro = normalize_angle(gyro.angle())
-        gyro_error = gyro - (-m_line_heading_deg)
+        gyro_angle_n = normalize_angle(gyro.angle())
+        gyro_error = gyro_angle_n - ( - m_line_heading_deg)
         correction = GYRO_CORRECTION_KP * gyro_error
         correction = max(-40, min(40, correction))
 
