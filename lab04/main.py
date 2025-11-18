@@ -381,10 +381,7 @@ def on_m_line_and_closer(robot_x, robot_y,
 
 def drive_towards_goal(goal_x, goal_y, m_line_heading_deg, speed=DRIVE_SPEED):
     """
-    沿 M-line 方向向目标前进：
-    - 使用陀螺仪保持朝向 m_line_heading_deg。
-    - 如果到达目标区域 => 返回 "goal"
-    - 如果碰到障碍物（触碰）=> 返回 "obstacle"
+    改进的M-line跟踪，使用横向偏移修正
     """
     update_odometry()
 
@@ -394,55 +391,96 @@ def drive_towards_goal(goal_x, goal_y, m_line_heading_deg, speed=DRIVE_SPEED):
     if dist_goal <= GOAL_TOLERANCE_MM:
         return "goal"
 
-    print("robot_heading: ", robot_heading)
-    print("m_line_heading: ", m_line_heading_deg)
-    # 转向到 M-line 方向
-    heading_error = normalize_angle(robot_heading - m_line_heading_deg)
-    if abs(heading_error) > 3:
-        turn_in_place_simple(heading_error, speed=TURN_SPEED)
-        wait(100)
+    # ⭐ 计算横向偏移（Cross-Track Error）
+    cross_track_error = point_line_distance(
+        robot_x, robot_y,
+        start_point_x, start_point_y,
+        goal_x, goal_y
+    )
+    
+    # 判断偏移方向（在M-line左侧还是右侧）
+    # 使用叉积判断
+    dx_line = goal_x - start_point_x
+    dy_line = goal_y - start_point_y
+    dx_robot = robot_x - start_point_x
+    dy_robot = robot_y - start_point_y
+    cross_product = dx_line * dy_robot - dy_line * dx_robot
+    
+    if cross_product > 0:
+        cross_track_error = -cross_track_error  # 在左侧，需要右转
+
+    desired_heading = m_line_heading_deg + math.degrees(
+            math.atan2(cross_track_error, 500)  # 500mm是预瞄距离
+        )
+    heading_error = normalize_angle(desired_heading - robot_heading)
+    if abs(heading_error) > 5:
+        turn_in_place_simple(-heading_error, speed=TURN_SPEED)
+        wait(50)
         update_odometry()
 
-    initial_gyro = gyro.angle()
-    GYRO_CORRECTION_KP = 5
+        
+
     sw = StopWatch()
     sw.reset()
-    max_run_time_ms = 180000  # fail-safe，防止无限跑
+    max_run_time_ms = 180000
+
+    # 横向偏移PID参数
+    CROSS_TRACK_KP = 0.3  # 横向偏移比例增益
+    HEADING_KP = 2.0      # 航向误差比例增益
 
     while True:
         update_odometry()
 
+        # 检查是否到达
         dx = goal_x - robot_x
         dy = goal_y - robot_y
         dist_goal = math.sqrt(dx*dx + dy*dy)
         if dist_goal <= GOAL_TOLERANCE_MM:
             left_motor.stop(Stop.BRAKE)
             right_motor.stop(Stop.BRAKE)
-            print("Bug2: reached goal while driving along M-line.")
+            update_odometry()
             return "goal"
 
+        # 检查碰撞
         if touch_left.pressed() or touch_right.pressed():
             left_motor.stop(Stop.BRAKE)
             right_motor.stop(Stop.BRAKE)
+            update_odometry()
             ev3.speaker.beep()
-            print("Bug2: obstacle hit while driving along M-line.")
             return "obstacle"
 
         if sw.time() > max_run_time_ms:
             left_motor.stop(Stop.BRAKE)
             right_motor.stop(Stop.BRAKE)
-            print("Bug2: timeout while driving towards goal.")
             return "timeout"
-        print("gyro_angle:", gyro.angle())
-        gyro_angle_n = normalize_angle(gyro.angle())
-        gyro_error = gyro_angle_n - ( - m_line_heading_deg)
-        correction = GYRO_CORRECTION_KP * gyro_error
-        correction = max(-40, min(40, correction))
-
-        print("correction: ", correction)
-        left_motor.run(speed * 1.1 - correction)
+        
+        # ⭐ 重新计算横向偏移
+        cross_track_error = point_line_distance(
+            robot_x, robot_y,
+            start_point_x, start_point_y,
+            goal_x, goal_y
+        )
+        
+        # 判断偏移方向
+        dx_line = goal_x - start_point_x
+        dy_line = goal_y - start_point_y
+        dx_robot = robot_x - start_point_x
+        dy_robot = robot_y - start_point_y
+        cross_product = dx_line * dy_robot - dy_line * dx_robot
+        
+        if cross_product > 0:
+            cross_track_error = -cross_track_error
+        
+        # ⭐ 同时修正朝向误差和横向偏移
+        heading_error = normalize_angle(m_line_heading_deg - robot_heading)
+        
+        # 组合修正量
+        correction = (HEADING_KP * heading_error + 
+                     CROSS_TRACK_KP * cross_track_error)
+        correction = max(-40, min(40, correction))        
+        left_motor.run(speed - correction)
         right_motor.run(speed + correction)
-        wait(200)
+        wait(50)
 
 def follow_wall_until_hit_point(goal_x, goal_y, hit_x, hit_y,
                                 target_distance_mm=TARGET_WALL_DISTANCE_MM, speed=DRIVE_SPEED,
@@ -625,7 +663,8 @@ def follow_wall_until_hit_point(goal_x, goal_y, hit_x, hit_y,
         dist_back_to_hit = math.sqrt((robot_x - hit_x)**2 + (robot_y - hit_y)**2)
         if step_count > 50 and dist_back_to_hit < HIT_POINT_TOLERANCE_MM:
             return "hit_point"
-        wait(50)  # 循环检测响应快一些
+        # TODO
+        wait(200)  # 循环检测响应快一些
 
         if step_count %50 ==0:
             print("robot_x: ", robot_x)
