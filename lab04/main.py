@@ -83,7 +83,7 @@ FINE_KI = 0.08
 FINE_KD = 3.0
 
 # ---------------------- Bug2-specific parameters ------------------------
-GOAL_TOLERANCE_MM = 200.0       # Within 10cm of goal => success
+GOAL_TOLERANCE_MM = 150.0       # Within 10cm of goal => success
 M_LINE_THRESHOLD_MM = 100      # Within 8cm of M-line => considered "on M-line"
 
 # ============================ INITIALIZATION =============================
@@ -148,11 +148,8 @@ def normalize_angle(angle_deg):
 
 
 def update_odometry():
-    """
-    Update robot's position using wheel odometry (differential drive kinematics).
-    Should be called regularly during movement to maintain accurate position tracking.
-    """
     global robot_x, robot_y, robot_heading, last_left_angle, last_right_angle, gyro_offset
+    # ⭐ 应该包含 gyro_offset
     
     left_angle = left_motor.angle()
     right_angle = right_motor.angle()
@@ -166,13 +163,23 @@ def update_odometry():
     last_left_angle = left_angle
     last_right_angle = right_angle
     
+    # 使用轮差计算角度变化
+    wheel_angle_change = math.degrees(
+        (right_distance - left_distance) / AXLE_TRACK_MM
+    )
+    
+    # 融合轮式里程计和陀螺仪
+    gyro_heading = -gyro.angle() + gyro_offset  # ⭐ 这里用到了 gyro_offset
+    wheel_based_heading = robot_heading + wheel_angle_change
+    
+    # 70%陀螺仪 + 30%轮差
+    robot_heading = 0.7 * gyro_heading + 0.3 * wheel_based_heading
+    
+    # 位置更新使用平均航向
+    avg_heading = robot_heading - wheel_angle_change / 2
+    heading_rad = math.radians(avg_heading)
+    
     forward_distance = (left_distance + right_distance) / 2.0
-    
-    # 全局航向角：注意这里使用 -gyro.angle() + offset
-    robot_heading = -gyro.angle() + gyro_offset
-    print("robot_heading: ", robot_heading)
-    heading_rad = math.radians(robot_heading)
-    
     robot_x += forward_distance * math.cos(heading_rad)
     robot_y += forward_distance * math.sin(heading_rad)
     
@@ -286,6 +293,8 @@ def turn_in_place_simple(angle_degrees, speed=TURN_SPEED):
         left_motor.run(turn)
         right_motor.run(-turn)
         wait(20)
+        update_odometry()
+        wait(20)
 
     left_motor.stop(Stop.BRAKE)
     right_motor.stop(Stop.BRAKE)
@@ -300,14 +309,14 @@ def handle_collision_recovery_intelligent():
     left_motor.stop(Stop.BRAKE)
     right_motor.stop(Stop.BRAKE)
     wait(50)
+    update_odometry()
 
     BACKUP_MM = 100
     drive_straight_pid(-BACKUP_MM, speed=DRIVE_SPEED * 0.7)
-    wait(150)
+    wait(50)
 
     turn_in_place_simple(70, speed=TURN_SPEED)
-    update_odometry()
-    wait(120)
+    wait(20)
 
     print("Collision recovery: backed up and turned RIGHT 70°")
     return True
@@ -433,7 +442,7 @@ def drive_towards_goal(goal_x, goal_y, m_line_heading_deg, speed=DRIVE_SPEED):
         print("correction: ", correction)
         left_motor.run(speed * 1.1 - correction)
         right_motor.run(speed + correction)
-        wait(500)
+        wait(200)
 
 def follow_wall_until_hit_point(goal_x, goal_y, hit_x, hit_y,
                                 target_distance_mm=TARGET_WALL_DISTANCE_MM, speed=DRIVE_SPEED,
@@ -616,7 +625,7 @@ def follow_wall_until_hit_point(goal_x, goal_y, hit_x, hit_y,
         dist_back_to_hit = math.sqrt((robot_x - hit_x)**2 + (robot_y - hit_y)**2)
         if step_count > 50 and dist_back_to_hit < HIT_POINT_TOLERANCE_MM:
             return "hit_point"
-        wait(200)  # 循环检测响应快一些
+        wait(50)  # 循环检测响应快一些
 
         if step_count %50 ==0:
             print("robot_x: ", robot_x)
@@ -647,7 +656,7 @@ def main_bug2():
                 break
             wait(10)
         ev3.speaker.beep()
-        wait(500)
+        wait(200)
 
         # ------- Bug2 起点与目标 -------
         start_point_x = 500.0   # 0.5 m
