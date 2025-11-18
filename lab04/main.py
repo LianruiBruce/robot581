@@ -43,36 +43,33 @@ AXLE_TRACK_MM = 125.0         # Distance between left and right wheels
 WHEEL_CIRCUMFERENCE_MM = math.pi * WHEEL_DIAMETER_MM
 
 # Movement Parameters
-DRIVE_SPEED = 240             # Motor speed in degrees per second for forward motion
+DRIVE_SPEED = 180             # Motor speed in degrees per second for forward motion
 TURN_SPEED = 150               # Motor speed in degrees per second for turning
 
 # Lab 3 Specific Parameters
-BACKUP_DISTANCE_MM = 100      # Distance to back away from obstacle (~15 cm)
+BACKUP_DISTANCE_MM = 100      # Distance to back away from obstacle (~18 cm)
 TARGET_WALL_DISTANCE_MM = 100 # Target distance from wall during following (15 cm)
 MAX_WALL_DISTANCE_MM = 180   # Maximum allowed distance (~23 cm)
 HIT_POINT_TOLERANCE_MM = 100  # How close to be considered "back at hit point"
-OBSTACLE_DETECTION_DISTANCE_MM = 300  # Distance to detect obstacle (30 cm)
+OBSTACLE_DETECTION_DISTANCE_MM = 350  # Distance to detect obstacle (35 cm)
 CORNER_DISTANCE_TOLERANCE_MM = 80     # 将最后一次正常距离视为拐角的容差
 FAKE_WALL_DISTANCE_MM = 330           # 用于拐角绕行的假设墙距（25 cm）
 FAKE_WALL_DISTANCE_MAX_MM = 360       # 用于拐角绕行的假设墙距最大值（40 cm）
-LEFT_CORNER_GAP      = 600         # mm: d_s must exceed target by this much
-LEFT_CORNER_DE_DOT   = 700.0          # mm/s: d_s must be increasing at least this fast
+LEFT_CORNER_GAP      = 450         # mm: d_s must exceed target by this much
+LEFT_CORNER_DE_DOT   = 500.0          # mm/s: d_s must be increasing at least this fast
 K_FAR = 10
-K_CORNER = 7
-MAX_D_STEP = 90
+K_CORNER = 1
+MAX_D_STEP = 40
 
 # Hit Point Definition (from lab requirements)
 HIT_POINT_X_MM = 2000.0     # 2.0 m
 HIT_POINT_Y_MM = 500.0      # 0.5 m
 
 # Wall Following PID Parameters
-WALL_KP = 0.8
-WALL_KI = 0.005
-WALL_KD = 0.8
+WALL_KP = 1.1
+WALL_KI = 0.002
+WALL_KD = 1.2
 
-# Dead Reckoning Parameters
-STEP_DISTANCE_MM = 80         # Distance to move in each step (dead reckoning)
-STEP_CHECK_INTERVAL = 10      # Check sensors every N steps
 
 # Straight Drive PID Parameters
 GYRO_KP = 2.0                 # Gyro correction PID gains
@@ -86,7 +83,7 @@ FINE_KI = 0.08
 FINE_KD = 3.0
 
 # ---------------------- Bug2-specific parameters ------------------------
-GOAL_TOLERANCE_MM = 100.0       # Within 10cm of goal => success
+GOAL_TOLERANCE_MM = 200.0       # Within 10cm of goal => success
 M_LINE_THRESHOLD_MM = 100      # Within 8cm of M-line => considered "on M-line"
 
 # ============================ INITIALIZATION =============================
@@ -264,7 +261,7 @@ def turn_in_place_simple(angle_degrees, speed=TURN_SPEED):
             deg += 360
         return deg
 
-    Kp = 2.5
+    Kp = 4
     Ki = 0.02
     Kd = 0.5
 
@@ -304,11 +301,11 @@ def handle_collision_recovery_intelligent():
     right_motor.stop(Stop.BRAKE)
     wait(50)
 
-    BACKUP_MM = 150
+    BACKUP_MM = 100
     drive_straight_pid(-BACKUP_MM, speed=DRIVE_SPEED * 0.7)
     wait(150)
 
-    turn_in_place_simple(80, speed=TURN_SPEED)
+    turn_in_place_simple(70, speed=TURN_SPEED)
     update_odometry()
     wait(120)
 
@@ -320,26 +317,25 @@ def handle_collision_recovery_intelligent():
 
 def point_line_distance(px, py, x1, y1, x2, y2):
     """
-    Compute perpendicular distance from point (px, py) to line defined by (x1,y1)-(x2,y2).
-    用于判断机器人是否回到了 M-line（起点到终点连线）。
+    计算点 (px, py) 到线段 (x1, y1)-(x2, y2) 的最短距离。
+    之前版本把 M-line 当作无限长直线；现在将投影约束在 [start, goal] 之间。
     """
     A = px - x1
     B = py - y1
     C = x2 - x1
     D = y2 - y1
 
-    dot = A * C + B * D
     len_sq = C * C + D * D
     if len_sq == 0:
-        return math.sqrt(A*A + B*B)
+        return math.sqrt(A * A + B * B)
 
-    param = dot / len_sq
+    param = max(0.0, min(1.0, (A * C + B * D) / len_sq))
     xx = x1 + param * C
     yy = y1 + param * D
 
     dx = px - xx
     dy = py - yy
-    return math.sqrt(dx*dx + dy*dy)
+    return math.sqrt(dx * dx + dy * dy)
 
 
 def on_m_line_and_closer(robot_x, robot_y,
@@ -439,72 +435,6 @@ def drive_towards_goal(goal_x, goal_y, m_line_heading_deg, speed=DRIVE_SPEED):
         right_motor.run(speed + correction)
         wait(500)
 
-
-# def follow_wall_step_only(speed=DRIVE_SPEED, target_distance_mm=TARGET_WALL_DISTANCE_MM):
-#     """
-#     Bug2 用的一步式贴墙步骤。
-#     使用与 Lab3 相同的：
-#       - 左侧超声波测距
-#       - PID（KP/KI/KD）调整左右轮速度
-#       - 使用 update_odometry() 更新坐标
-#       - 遇到触碰 => 调用 handle_collision_recovery_intelligent()
-#     """
-#     global last_valid_wall_distance
-#     global bug2_wall_integral, bug2_wall_last_error, bug2_wall_last_distance
-
-#     # 读取并平滑距离
-#     try:
-#         raw_d = ultrasonic.distance()
-#         if raw_d > 0 and raw_d < 2000:
-#             alpha = 0.5
-#             d = alpha * raw_d + (1 - alpha) * bug2_wall_last_distance
-#         else:
-#             d = bug2_wall_last_distance
-#     except:
-#         d = bug2_wall_last_distance
-
-#     bug2_wall_last_distance = d
-#     last_valid_wall_distance = d
-
-#     error = target_distance_mm - d  # 太靠近墙 => error>0
-
-#     # PID
-#     bug2_wall_integral += error * 0.1
-#     bug2_wall_integral = max(-50, min(50, bug2_wall_integral))
-#     derivative = (error - bug2_wall_last_error) / 0.1
-#     bug2_wall_last_error = error
-
-#     p = WALL_KP * error
-#     i = WALL_KI * bug2_wall_integral
-#     d_term = WALL_KD * derivative
-
-#     correction = p + i + d_term
-#     correction = max(-60, min(60, correction))
-
-#     # 与你原来的逻辑一致：
-#     # 太靠近墙 => correction>0 => left_speed大，右转远离墙；太远 => correction<0 => 右轮快，左转贴近墙。
-#     left_speed = speed + correction
-#     right_speed = speed - correction
-
-#     min_speed = 50
-#     max_speed = speed * 1.4
-#     left_speed = max(min_speed, min(max_speed, left_speed))
-#     right_speed = max(min_speed, min(max_speed, right_speed))
-
-#     # 碰撞检测
-#     if touch_left.pressed() or touch_right.pressed():
-#         left_motor.stop(Stop.BRAKE)
-#         right_motor.stop(Stop.BRAKE)
-#         wait(100)
-#         handle_collision_recovery_intelligent()
-#         update_odometry()
-#         return
-
-#     left_motor.run(left_speed)
-#     right_motor.run(right_speed)
-#     update_odometry()
-#     wait(20)
-
 def follow_wall_until_hit_point(goal_x, goal_y, hit_x, hit_y,
                                 target_distance_mm=TARGET_WALL_DISTANCE_MM, speed=DRIVE_SPEED,
                                 ):
@@ -524,9 +454,6 @@ def follow_wall_until_hit_point(goal_x, goal_y, hit_x, hit_y,
     step_count = 0  # 步数计数
     continue_far = 0  # 连续过远计数器
     corner_trigger_count = 0
-    min_distance_seen = float('inf')  # 跟踪离hit点最近的距离
-    initial_distance_to_hit = None    # 首次记录距离hit点的位置
-    max_distance_from_hit = 0         # 记录离hit点最远的距离
     initial_gyro_angle = gyro.angle()  # 记录初始陀螺仪角度
     
     print("Enter wall following")
@@ -578,7 +505,20 @@ def follow_wall_until_hit_point(goal_x, goal_y, hit_x, hit_y,
         elif error < LEFT_CORNER_GAP:
             corner_trigger_count = 0
         
-#        连续5次远离 → 拐角
+        # 检查碰撞（触碰传感器是否按下）
+        left_pressed = touch_left.pressed()
+        right_pressed = touch_right.pressed()
+
+        if left_pressed or right_pressed:
+            left_motor.stop(Stop.BRAKE)
+            right_motor.stop(Stop.BRAKE)
+            wait(100)
+
+            # 智能碰撞恢复（根据哪个传感器撞到来调整）
+            handle_collision_recovery_intelligent()
+            integral = 0
+            last_error = 0
+            continue
         #if error > LEFT_CORNER_GAP and derivative > LEFT_CORNER_DE_DOT: 
         if corner_trigger_count >= K_CORNER:
             print("Enter left turn")
@@ -622,7 +562,7 @@ def follow_wall_until_hit_point(goal_x, goal_y, hit_x, hit_y,
 
         correction = p + i + d
         # 再限制修正量，放缓反应速度
-        correction = max(-60, min(60, correction))
+        correction = max(-45, min(45, correction))
 
         # 按照PID调整之后的左右轮速度
         # 如果太靠近墙壁（error>0，correction>0），左电机快，机器人右转，远离墙
@@ -632,39 +572,25 @@ def follow_wall_until_hit_point(goal_x, goal_y, hit_x, hit_y,
 
         # 限制实际速度（安全+防止速度过大形变）
         min_speed = 50
-        max_speed = speed * 1.4
+        max_speed = speed * 1.2
         left_speed = max(min_speed, min(max_speed, left_speed))
         right_speed = max(min_speed, min(max_speed, right_speed))
-        # 每走一步都清零电机转角，记录起始陀螺仪角度
-        # 注意：这里不需要先 update_odometry()，因为我们只是为了测量本步距离
-        #reset_and_sync_encoders()
-
         
-        # 检查碰撞（触碰传感器是否按下）
-        left_pressed = touch_left.pressed()
-        right_pressed = touch_right.pressed()
+        # # 检查碰撞（触碰传感器是否按下）
+        # left_pressed = touch_left.pressed()
+        # right_pressed = touch_right.pressed()
 
-        if left_pressed or right_pressed:
-            left_motor.stop(Stop.BRAKE)
-            right_motor.stop(Stop.BRAKE)
-            wait(100)
+        # if left_pressed or right_pressed:
+        #     left_motor.stop(Stop.BRAKE)
+        #     right_motor.stop(Stop.BRAKE)
+        #     wait(100)
 
-            # 智能碰撞恢复（根据哪个传感器撞到来调整）
-            handle_collision_recovery_intelligent()
-            integral = 0
-            last_error = 0
-            continue
-        # # 用陀螺仪纠偏直线（防止偏航）
-        # gyro_error = gyro.angle() - initial_gyro
-        # gyro_correction = 2.0 * gyro_error  # 校准比例
-        # gyro_correction = max(-20, min(20, gyro_correction))  # 避免修正过大
+        #     # 智能碰撞恢复（根据哪个传感器撞到来调整）
+        #     handle_collision_recovery_intelligent()
+        #     integral = 0
+        #     last_error = 0
+        #     continue
 
-        # left_step_speed = left_speed - gyro_correction
-        # right_step_speed = right_speed + gyro_correction
-
-        # 运行电机前进一步
-        # print("left_speed: ", left_speed)
-        # print("right_speed: ", right_speed)
         left_motor.run(left_speed)
         right_motor.run(right_speed)
         # ★ 每步内做里程计积分，捕捉弧线位移
