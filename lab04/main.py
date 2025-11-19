@@ -55,8 +55,8 @@ OBSTACLE_DETECTION_DISTANCE_MM = 350  # Distance to detect obstacle (35 cm)
 CORNER_DISTANCE_TOLERANCE_MM = 80     # 将最后一次正常距离视为拐角的容差
 FAKE_WALL_DISTANCE_MM = 330           # 用于拐角绕行的假设墙距（25 cm）
 FAKE_WALL_DISTANCE_MAX_MM = 360       # 用于拐角绕行的假设墙距最大值（40 cm）
-LEFT_CORNER_GAP      = 400         # mm: d_s must exceed target by this much
-LEFT_CORNER_DE_DOT   = 450.0          # mm/s: d_s must be increasing at least this fast
+LEFT_CORNER_GAP      = 200         # mm: d_s must exceed target by this much 400
+# LEFT_CORNER_DE_DOT   = 450.0          # mm/s: d_s must be increasing at least this fast
 K_FAR = 10
 K_CORNER = 1
 MAX_D_STEP = 40
@@ -276,6 +276,14 @@ def turn_in_place_simple(angle_degrees, speed=TURN_SPEED):
     last_error = 0
 
     while True:
+        # 冲的过程中如果又撞到了前墙，交给你的智能碰撞恢复
+        if touch_left.pressed() or touch_right.pressed():
+            left_motor.stop(Stop.BRAKE)
+            right_motor.stop(Stop.BRAKE)
+            update_odometry()
+            wait(100)
+            handle_collision_recovery_intelligent()
+        
         current_gyro = gyro.angle()
         error = normalize_angle_simple(target_gyro - current_gyro)
         if abs(error) < 2:
@@ -311,7 +319,7 @@ def handle_collision_recovery_intelligent():
     4) 前冲一小段（恢复到可测墙的稳定几何区域）
     """
 
-    global goal_x, goal_y   
+    global goal_x, goal_y, robot_x, robot_y , last_min_goal_dist
     # (0) 停下来
     left_motor.stop(Stop.BRAKE)
     right_motor.stop(Stop.BRAKE)
@@ -581,135 +589,100 @@ def follow_wall_until_hit_point(goal_x, goal_y, hit_x, hit_y,
     else:
         last_distance = raw
 
-    ALPHA = 0.4  # 距离 EMA 滤波（比 0.5 稍微平稳一点）
+    ALPHA = 0.5  # 距离 EMA 滤波（比 0.5 稍微平稳一点）
 
     # 编码器重新对齐
     update_odometry()
     reset_and_sync_encoders()
 
     step_count = 0
-    corner_trigger_count = 0
-
-    print("Enter wall following (Bug2)")
-
     while True:
         step_count += 1
-
         # ===================== 1) 超声波读取 + 预处理 =====================
         raw_d = ultrasonic.distance()
         if raw_d is None or raw_d <= 0:
             # 读不到墙，就先用上一次
             raw_d = last_distance
-
         # 原始斜率，用于拐角检测
         deriv_raw = raw_d - last_distance
 
         # ---------- 真拐角检测 ----------
         # “距离突然大很多 + 斜率很大” => 说明前面的这段墙结束了，需要左转去找下一面墙
-        if raw_d > (target_distance_mm + LEFT_CORNER_GAP) and deriv_raw > LEFT_CORNER_DE_DOT:
-            corner_trigger_count += 1
-            print("[Corner trigger {} / {}] raw_d={}, deriv={}".format(
-                corner_trigger_count, K_CORNER, raw_d, deriv_raw
-            ))
+        #  and deriv_raw > LEFT_CORNER_DE_DOT:
+        if raw_d > (target_distance_mm + LEFT_CORNER_GAP):
+            # 1) 先停止并重置编码器
+            left_motor.stop(Stop.BRAKE)
+            right_motor.stop(Stop.BRAKE)
+            reset_and_sync_encoders()
+            update_odometry()
+            # 2) 左转一个固定角度（负值 = 左转；墙在左边，遇到拐角需要左转过去）
+            turn_in_place_simple(-40, speed=TURN_SPEED)   # 60° 左转，视实际情况可调
+            wait(30)
+            reset_and_sync_encoders()
+            update_odometry()
 
-            if corner_trigger_count >= K_CORNER:
-                print("[REAL LEFT CORNER CONFIRMED] -> turn left & surge")
+            # 3) 再向前冲一点，让机器人真正靠上新的那面墙
+            surge_mm = 200.0
+            surge_deg = (surge_mm / WHEEL_CIRCUMFERENCE_MM) * 360.0
+            while True:
+                avg_rot = (abs(left_motor.angle()) + abs(right_motor.angle())) / 2
+                if avg_rot >= surge_deg:
+                    break
 
-                # 1) 先停止并重置编码器
-                left_motor.stop(Stop.BRAKE)
-                right_motor.stop(Stop.BRAKE)
-                reset_and_sync_encoders()
-
-                # 2) 左转一个固定角度（负值 = 左转；墙在左边，遇到拐角需要左转过去）
-                turn_in_place_simple(-45, speed=TURN_SPEED)   # 60° 左转，视实际情况可调
-                wait(30)
-                reset_and_sync_encoders()
+                left_motor.run(240)
+                right_motor.run(240)
                 update_odometry()
 
-                # 3) 再向前冲一点，让机器人真正靠上新的那面墙
-                surge_mm = 200.0
-                surge_deg = (surge_mm / WHEEL_CIRCUMFERENCE_MM) * 360.0
-                while True:
-                    avg_rot = (abs(left_motor.angle()) + abs(right_motor.angle())) / 2
-                    if avg_rot >= surge_deg:
-                        break
-
-                    left_motor.run(240)
-                    right_motor.run(240)
+                # 冲的过程中如果又撞到了前墙，交给你的智能碰撞恢复
+                if touch_left.pressed() or touch_right.pressed():
+                    left_motor.stop(Stop.BRAKE)
+                    right_motor.stop(Stop.BRAKE)
                     update_odometry()
-
-                    dist_now = ultrasonic.distance()
-                    if dist_now is not None and dist_now > 0 and dist_now < 50:      # < 50mm = 5cm
-                        print("[SURGE TOO CLOSE] dist={} -> emergency right turn".format(dist_now))
-
-                        # 1) 停止
-                        left_motor.stop(Stop.BRAKE)
-                        right_motor.stop(Stop.BRAKE)
-                        wait(60)
-                        update_odometry()
-
-                        # 2) 右转 25°（正值右转）
-                        turn_in_place_simple(25, speed=TURN_SPEED)
-                        wait(60)
-                        reset_and_sync_encoders()
-                        update_odometry()
-
-                        # 3) 跳出 surge，不继续冲
-                        break
-
-                    # 冲的过程中如果又撞到了前墙，交给你的智能碰撞恢复
-                    if touch_left.pressed() or touch_right.pressed():
-                        left_motor.stop(Stop.BRAKE)
-                        right_motor.stop(Stop.BRAKE)
-                        update_odometry()
-                        wait(100)
-                        collision_result = handle_collision_recovery_intelligent()
-                        if collision_result == "goal":
-                            return "goal"
-                        elif collision_result == "leave":
-                            return "leave"
-                        reset_and_sync_encoders()
-                        break
-
-                    # (1) 到达最终目标
-                    dxg = goal_x - robot_x
-                    dyg = goal_y - robot_y
-                    dist_goal = math.sqrt(dxg * dxg + dyg * dyg)
-                    if dist_goal <= GOAL_TOLERANCE_MM:
-                        left_motor.stop(Stop.BRAKE)
-                        right_motor.stop(Stop.BRAKE)
-                        update_odometry()
+                    wait(100)
+                    collision_result = handle_collision_recovery_intelligent()
+                    if collision_result == "goal":
                         return "goal"
-
-                    # (2) 回到 M-line 且比以往更接近目标 => 可以离开障碍物
-                    leave, last_min_goal_dist = on_m_line_and_closer(
-                        robot_x, robot_y,
-                        start_point_x, start_point_y,
-                        goal_x, goal_y,
-                        last_min_goal_dist,
-                        m_line_threshold=M_LINE_THRESHOLD_MM
-                    )
-                    if leave:
-                        left_motor.stop(Stop.BRAKE)
-                        right_motor.stop(Stop.BRAKE)
-                        update_odometry()
-                        print("[Bug2] leave obstacle on M-line")
+                    elif collision_result == "leave":
                         return "leave"
+                    reset_and_sync_encoders()
+                    break
+
+                # (1) 到达最终目标
+                dxg = goal_x - robot_x
+                dyg = goal_y - robot_y
+                dist_goal = math.sqrt(dxg * dxg + dyg * dyg)
+                if dist_goal <= GOAL_TOLERANCE_MM:
+                    left_motor.stop(Stop.BRAKE)
+                    right_motor.stop(Stop.BRAKE)
+                    update_odometry()
+                    return "goal"
+
+                # (2) 回到 M-line 且比以往更接近目标 => 可以离开障碍物
+                leave, last_min_goal_dist = on_m_line_and_closer(
+                    robot_x, robot_y,
+                    start_point_x, start_point_y,
+                    goal_x, goal_y,
+                    last_min_goal_dist,
+                    m_line_threshold=M_LINE_THRESHOLD_MM
+                )
+                if leave:
+                    left_motor.stop(Stop.BRAKE)
+                    right_motor.stop(Stop.BRAKE)
+                    update_odometry()
+                    print("[Bug2] leave obstacle on M-line")
+                    return "leave"
 
 
-                    wait(10)
+                wait(10)
 
-                # 拐角处理完：重置 corner 计数，距离回到目标附近
-                corner_trigger_count = 0
-                last_distance = target_distance_mm
-                integral = 0.0
-                last_error = 0.0
-                wait(40)
-                # 不做 PID 一步，直接进入下一轮 while
-                continue
-        else:
-            # 条件不满足，重置 trigger 计数
+            # 拐角处理完：重置 corner 计数，距离回到目标附近
             corner_trigger_count = 0
+            last_distance = target_distance_mm
+            integral = 0.0
+            last_error = 0.0
+            wait(40)
+            # 不做 PID 一步，直接进入下一轮 while
+            continue
 
         # ---------- 假远距离保护 ----------
         # 有时车身姿态有点斜，瞬间读到一个很远的数，这里只轻微往墙内拉一点
@@ -940,7 +913,7 @@ def main_bug2():
                     goal_x, goal_y,
                     hit_x, hit_y,
                     target_distance_mm=TARGET_WALL_DISTANCE_MM,
-                    speed=DRIVE_SPEED)
+                    speed=DRIVE_SPEED * 0.8)
 
                     # 绕行过程中也检查是否刚好到达目标
                 if obstacle_result == "goal":
