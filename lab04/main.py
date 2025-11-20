@@ -48,17 +48,15 @@ TURN_SPEED = 150               # Motor speed in degrees per second for turning
 
 # Lab 3 Specific Parameters
 BACKUP_DISTANCE_MM = 130      # Distance to back away from obstacle (~18 cm)
-TARGET_WALL_DISTANCE_MM = 130 # Target distance from wall during following (15 cm)
+TARGET_WALL_DISTANCE_MM = 120 # Target distance from wall during following (15 cm)
 MAX_WALL_DISTANCE_MM = 180   # Maximum allowed distance (~23 cm)
 HIT_POINT_TOLERANCE_MM = 100  # How close to be considered "back at hit point"
 OBSTACLE_DETECTION_DISTANCE_MM = 350  # Distance to detect obstacle (35 cm)
 CORNER_DISTANCE_TOLERANCE_MM = 80     # 将最后一次正常距离视为拐角的容差
 FAKE_WALL_DISTANCE_MM = 330           # 用于拐角绕行的假设墙距（25 cm）
 FAKE_WALL_DISTANCE_MAX_MM = 360       # 用于拐角绕行的假设墙距最大值（40 cm）
-LEFT_CORNER_GAP      = 200         # mm: d_s must exceed target by this much 400
+LEFT_CORNER_GAP      = 180         # mm: d_s must exceed target by this much 400
 # LEFT_CORNER_DE_DOT   = 450.0          # mm/s: d_s must be increasing at least this fast
-K_FAR = 10
-K_CORNER = 1
 MAX_D_STEP = 40
 
 # Hit Point Definition (from lab requirements)
@@ -173,7 +171,7 @@ def update_odometry():
     wheel_based_heading = robot_heading + wheel_angle_change
     
     # 70%陀螺仪 + 30%轮差
-    robot_heading = 0.5 * gyro_heading + 0.5 * wheel_based_heading
+    robot_heading = 0.3 * gyro_heading + 0.7 * wheel_based_heading
     
     # 位置更新使用平均航向
     avg_heading = robot_heading - wheel_angle_change / 2
@@ -300,9 +298,8 @@ def turn_in_place_simple(angle_degrees, speed=TURN_SPEED):
 
         left_motor.run(turn)
         right_motor.run(-turn)
-        wait(20)
         update_odometry()
-        wait(20)
+        wait(10)
 
     left_motor.stop(Stop.BRAKE)
     right_motor.stop(Stop.BRAKE)
@@ -443,7 +440,7 @@ def on_m_line_and_closer(robot_x, robot_y,
     dist_line = point_line_distance(robot_x, robot_y,
                                     start_x, start_y,
                                     goal_x, goal_y)
-    print("dist to line: ", dist_line)
+    #print("dist to line: ", dist_line)
 
     if dist_line > m_line_threshold:
         return False, last_min_dist_to_goal
@@ -561,6 +558,7 @@ def drive_towards_goal(goal_x, goal_y, m_line_heading_deg, speed=DRIVE_SPEED):
         left_motor.run(speed - correction)
         right_motor.run(speed + correction)
         wait(50)
+        update_odometry()
 
 def follow_wall_until_hit_point(goal_x, goal_y, hit_x, hit_y,
                                 target_distance_mm=TARGET_WALL_DISTANCE_MM, speed=DRIVE_SPEED):
@@ -576,6 +574,7 @@ def follow_wall_until_hit_point(goal_x, goal_y, hit_x, hit_y,
       - 拐角检测单独分支（避免误判造成猛撞）
       - PID 反应稍微温和一点，减少过度转向
     """
+    update_odometry()
     global last_min_goal_dist
 
     # ---- PID 状态 ----
@@ -584,12 +583,12 @@ def follow_wall_until_hit_point(goal_x, goal_y, hit_x, hit_y,
 
     # 初始距离用当前测距（如果异常就退回 target）
     raw = ultrasonic.distance()
-    if raw is None or raw <= 0:
-        last_distance = target_distance_mm
+    if raw is None:
+        last_distance = 2550
     else:
         last_distance = raw
 
-    ALPHA = 0.5  # 距离 EMA 滤波（比 0.5 稍微平稳一点）
+    ALPHA = 0.4  # 距离 EMA 滤波（比 0.5 稍微平稳一点）
 
     # 编码器重新对齐
     update_odometry()
@@ -597,12 +596,13 @@ def follow_wall_until_hit_point(goal_x, goal_y, hit_x, hit_y,
 
     step_count = 0
     while True:
+        update_odometry()
         step_count += 1
         # ===================== 1) 超声波读取 + 预处理 =====================
         raw_d = ultrasonic.distance()
-        if raw_d is None or raw_d <= 0:
+        if raw_d is None:
             # 读不到墙，就先用上一次
-            raw_d = last_distance
+            raw_d = 2550
         # 原始斜率，用于拐角检测
         deriv_raw = raw_d - last_distance
 
@@ -622,13 +622,14 @@ def follow_wall_until_hit_point(goal_x, goal_y, hit_x, hit_y,
             update_odometry()
 
             # 3) 再向前冲一点，让机器人真正靠上新的那面墙
-            surge_mm = 200.0
+            surge_mm = 150.0
             surge_deg = (surge_mm / WHEEL_CIRCUMFERENCE_MM) * 360.0
             while True:
                 avg_rot = (abs(left_motor.angle()) + abs(right_motor.angle())) / 2
                 if avg_rot >= surge_deg:
+                    update_odometry()
                     break
-
+                
                 left_motor.run(240)
                 right_motor.run(240)
                 update_odometry()
@@ -646,7 +647,10 @@ def follow_wall_until_hit_point(goal_x, goal_y, hit_x, hit_y,
                         return "leave"
                     reset_and_sync_encoders()
                     break
-
+                
+                if ultrasonic.distance() < 100: 
+                    update_odometry()
+                    break
                 # (1) 到达最终目标
                 dxg = goal_x - robot_x
                 dyg = goal_y - robot_y
@@ -671,13 +675,11 @@ def follow_wall_until_hit_point(goal_x, goal_y, hit_x, hit_y,
                     update_odometry()
                     print("[Bug2] leave obstacle on M-line")
                     return "leave"
-
-
                 wait(10)
 
             # 拐角处理完：重置 corner 计数，距离回到目标附近
-            corner_trigger_count = 0
             last_distance = target_distance_mm
+            update_odometry()
             integral = 0.0
             last_error = 0.0
             wait(40)
@@ -720,7 +722,7 @@ def follow_wall_until_hit_point(goal_x, goal_y, hit_x, hit_y,
             reset_and_sync_encoders()
             update_odometry()
             continue
-
+        update_odometry()
         # ===================== 3) 墙距 PID 控制 =====================
         # 这里继续沿用你原本的定义：error = target - current
         error = target_distance_mm - current_distance
@@ -800,7 +802,6 @@ def follow_wall_until_hit_point(goal_x, goal_y, hit_x, hit_y,
             ))
 
 
-
 # ======================= Bug2 主程序（新增） =======================
 
 def main_bug2():
@@ -835,26 +836,20 @@ def main_bug2():
         robot_y = start_point_y
         robot_heading = 90
 
-        goal_x = 2567.0         # 2.5 m
-        goal_y = 2578.0         # 2.5 m
+        goal_x = 2550.0         # 2.5 m 2567
+        goal_y = 2587.0         # 2.5 m
 
         reset_and_sync_encoders()
         gyro_offset = 0.0
         gyro.reset_angle(-90)
         wait(50)
-
-        print("="*50)
-        print("Bug2 Start at (0.5 m, 0.0 m)")
-        print("Goal at (2.5 m, 2.5 m)")
-        print("Start: ({:.0f}, {:.0f}) mm".format(start_point_x, start_point_y))
-        print("="*50)
+        update_odometry()
 
         global m_line_heading_deg
         # M-line 方向角（整个过程保持不变）
         m_line_heading_deg = math.degrees(
             math.atan2(goal_y - start_point_y, goal_x - start_point_x)
         )
-        print("m_line_heading: ", m_line_heading_deg)
        
         global last_min_goal_dist
         # Bug2 中：记录在 M-line 上距目标的“最小距离”
