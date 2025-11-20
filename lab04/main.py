@@ -1,6 +1,7 @@
 #!/usr/bin/env pybricks-micropython
-# Team Members: Lianrui Geng && Xinyi Guo
-# Lab 03  BOUNDARY TRACING AND RETURN TO START + Bug2 Algorithm
+# Team Members: Lianrui Geng(730900989) && Xinyi Guo(730944584)
+# 
+# Lab 04  Bug2 Algorithm
 #
 # This program implements:
 #   - Lab 3: Boundary Tracing & Return to Start (original logic, kept intact)
@@ -52,9 +53,9 @@ TARGET_WALL_DISTANCE_MM = 120 # Target distance from wall during following (15 c
 MAX_WALL_DISTANCE_MM = 180   # Maximum allowed distance (~23 cm)
 HIT_POINT_TOLERANCE_MM = 100  # How close to be considered "back at hit point"
 OBSTACLE_DETECTION_DISTANCE_MM = 350  # Distance to detect obstacle (35 cm)
-CORNER_DISTANCE_TOLERANCE_MM = 80     # 将最后一次正常距离视为拐角的容差
-FAKE_WALL_DISTANCE_MM = 330           # 用于拐角绕行的假设墙距（25 cm）
-FAKE_WALL_DISTANCE_MAX_MM = 360       # 用于拐角绕行的假设墙距最大值（40 cm）
+CORNER_DISTANCE_TOLERANCE_MM = 80     
+FAKE_WALL_DISTANCE_MM = 330           
+FAKE_WALL_DISTANCE_MAX_MM = 360       
 LEFT_CORNER_GAP      = 180         # mm: d_s must exceed target by this much 400
 # LEFT_CORNER_DE_DOT   = 450.0          # mm/s: d_s must be increasing at least this fast
 MAX_D_STEP = 40
@@ -107,7 +108,7 @@ last_left_angle = 0           # Last left motor encoder reading
 last_right_angle = 0          # Last right motor encoder reading
 last_valid_wall_distance = TARGET_WALL_DISTANCE_MM  # 记录最近一次可靠的墙距读数
 
-# Starting position (星星位置)
+# Starting position
 start_point_x = 0.0
 start_point_y = 0.0
 
@@ -126,7 +127,7 @@ bug2_wall_last_distance = TARGET_WALL_DISTANCE_MM
 
 def reset_and_sync_encoders():
     """
-    重置电机编码器并同步里程计变量。
+    reset and sync encoders
     """
     global last_left_angle, last_right_angle
     left_motor.reset_angle(0)
@@ -144,10 +145,9 @@ def normalize_angle(angle_deg):
         angle_deg -= 360
     return angle_deg
 
-
 def update_odometry():
     global robot_x, robot_y, robot_heading, last_left_angle, last_right_angle, gyro_offset
-    # ⭐ 应该包含 gyro_offset
+    # 应该包含 gyro_offset
     
     left_angle = left_motor.angle()
     right_angle = right_motor.angle()
@@ -170,7 +170,7 @@ def update_odometry():
     gyro_heading = -gyro.angle() + gyro_offset  # ⭐ 这里用到了 gyro_offset
     wheel_based_heading = robot_heading + wheel_angle_change
     
-    # 70%陀螺仪 + 30%轮差
+    # 70%陀螺仪 + 30%轮差 (maybe need to change)
     robot_heading = 0.3 * gyro_heading + 0.7 * wheel_based_heading
     
     # 位置更新使用平均航向
@@ -274,7 +274,7 @@ def turn_in_place_simple(angle_degrees, speed=TURN_SPEED):
     last_error = 0
 
     while True:
-        # 冲的过程中如果又撞到了前墙，交给你的智能碰撞恢复
+        # 冲的过程中如果又撞到了前墙，交给智能碰撞恢复
         if touch_left.pressed() or touch_right.pressed():
             left_motor.stop(Stop.BRAKE)
             right_motor.stop(Stop.BRAKE)
@@ -335,7 +335,7 @@ def handle_collision_recovery_intelligent():
     update_odometry()
 
     # ========== (3) 微小前冲 ========== 
-    SURGE_MM = 90     # 建议 80–120mm，EV3 最稳区间
+    SURGE_MM = 90     # 80–120mm
     surge_deg = (SURGE_MM / WHEEL_CIRCUMFERENCE_MM) * 360
 
     reset_and_sync_encoders()
@@ -394,8 +394,6 @@ def handle_collision_recovery_intelligent():
     right_motor.stop(Stop.BRAKE)
     wait(100)
     update_odometry()
-
-    print("Collision recovery: back, rotate 90°, surge forward")
     return True
 
 
@@ -531,7 +529,7 @@ def drive_towards_goal(goal_x, goal_y, m_line_heading_deg, speed=DRIVE_SPEED):
             right_motor.stop(Stop.BRAKE)
             return "timeout"
         
-        # ⭐ 重新计算横向偏移
+        # 重新计算横向偏移
         cross_track_error = point_line_distance(
             robot_x, robot_y,
             start_point_x, start_point_y,
@@ -548,7 +546,7 @@ def drive_towards_goal(goal_x, goal_y, m_line_heading_deg, speed=DRIVE_SPEED):
         if cross_product > 0:
             cross_track_error = -cross_track_error
         
-        # ⭐ 同时修正朝向误差和横向偏移
+        # 同时修正朝向误差和横向偏移
         heading_error = normalize_angle(m_line_heading_deg - robot_heading)
         
         # 组合修正量
@@ -608,7 +606,6 @@ def follow_wall_until_hit_point(goal_x, goal_y, hit_x, hit_y,
 
         # ---------- 真拐角检测 ----------
         # “距离突然大很多 + 斜率很大” => 说明前面的这段墙结束了，需要左转去找下一面墙
-        #  and deriv_raw > LEFT_CORNER_DE_DOT:
         if raw_d > (target_distance_mm + LEFT_CORNER_GAP):
             # 1) 先停止并重置编码器
             left_motor.stop(Stop.BRAKE)
@@ -620,7 +617,6 @@ def follow_wall_until_hit_point(goal_x, goal_y, hit_x, hit_y,
             wait(30)
             reset_and_sync_encoders()
             update_odometry()
-
             # 3) 再向前冲一点，让机器人真正靠上新的那面墙
             surge_mm = 150.0
             surge_deg = (surge_mm / WHEEL_CIRCUMFERENCE_MM) * 360.0
@@ -629,7 +625,6 @@ def follow_wall_until_hit_point(goal_x, goal_y, hit_x, hit_y,
                 if avg_rot >= surge_deg:
                     update_odometry()
                     break
-                
                 left_motor.run(240)
                 right_motor.run(240)
                 update_odometry()
@@ -922,12 +917,6 @@ def main_bug2():
                 if obstacle_result == "leave":
                     print("Bug2: back on M-line and closer to goal. Leave obstacle.")
                     update_odometry()
-                    # 面向 M-line 方向
-                    # heading_error = normalize_angle(m_line_heading_deg - robot_heading)
-                    # if abs(heading_error) > 3:
-                    #     turn_in_place_simple(heading_error, speed=TURN_SPEED)
-                    #     wait(100)
-                    #     update_odometry()
                     continue  # 跳出绕墙循环，回到外层 while，继续朝目标直行
 
                     # 检查是否绕了一整圈又回到同一个 hit point
@@ -948,5 +937,4 @@ def main_bug2():
 # ============================ RUN PROGRAM =============================
 
 if __name__ == "__main__":
-    # 原来的 Lab3 main() 仍然保留在文件中，但这里我们运行 Bug2 主程序
     main_bug2()
